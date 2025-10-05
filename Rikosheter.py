@@ -1,27 +1,22 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Laser—рикошеты (Tkinter, PIL)
-Порт основной функциональности из предоставленного HTML+JS:
-- рисование свободными штрихами (strokes)
-- пан/зум/поворот камеры
-- рамка выделения для нанесения номера или ластика
-- теги/метки на отрезках с номерами
-- экспорт/импорт (JSON)
-- загрузка изображения и маски отражения (по яркости/сатурации)
-- трассировка лазера с рикошетами по линиям и отражениям от изображения
-- процедурная расстановка номеров по отрезкам
 
-Зависимости:
-- Python 3.8+
-- Pillow (PIL)
+Добавлена кнопка "Поиск рикошетов":
+- Открывает текстовый файл с набором чисел (например "1 2 3 4 5").
+- Вращает лазер по углу от текущего значения на шаг 1° (настраиваемо) до полного оборота или пока не найдётся комбинация рикошетов,
+  генерирующая ту же последовательность чисел. Когда найдено — поиск останавливается и угол лазера устанавливается.
+
+Остальной функционал не изменён.
 
 Запуск: сохранить в файл laser_ricochet.py и запустить: python laser_ricochet.py
-
 """
 
 import tkinter as tk
 from tkinter import ttk, colorchooser, filedialog, simpledialog, messagebox
 from PIL import Image, ImageTk, ImageOps
-import math, random, json, time, io
+import math, random, json, time, io, re
 
 # ---- Вспомогательные векторы ----
 
@@ -79,6 +74,13 @@ class LaserApp:
         self.reflect_lum_threshold = 200
         self.sat_threshold = 0.15
         self.image_reflect_color = True
+
+        # Поиск рикошетов (состояние)
+        self._search_running = False
+        self._search_target = None
+        self._search_step_deg = 1.0
+        self._search_initial_angle = None
+        self._search_steps_done = 0
 
         # UI
         self._build_ui()
@@ -171,6 +173,10 @@ class LaserApp:
         ttk.Button(modes_fr, text='Импорт TXT', command=self.import_txt).grid(row=2, column=2)
 
         ttk.Button(modes_fr, text='Процедурно расставить', command=self.procedural_assign_prompt).grid(row=3, column=0, columnspan=3, pady=4)
+
+        # Новая кнопка: Поиск рикошетов
+        self.search_btn = ttk.Button(modes_fr, text='Поиск рикошетов', command=self.search_ricochet_file)
+        self.search_btn.grid(row=4, column=0, columnspan=3, pady=4)
 
         # Image controls
         img_fr = ttk.LabelFrame(top, text='Изображение (стена)')
@@ -846,9 +852,6 @@ class LaserApp:
         self.erase_btn.config(text=f"Ластик: {'Вкл' if self.is_erasing else 'Выкл'}")
         if self.is_erasing: self.is_framing = False; self.frame_btn.config(text='Режим рамки: Выкл')
 
-    #def apply_number_from_frame(self):
-    #    self.apply_number_from_frame()
-
     # ---- Procedural assignment ----
     def procedural_assign_prompt(self):
         if not self.strokes:
@@ -916,6 +919,99 @@ class LaserApp:
         with open(fn, 'w', encoding='utf-8') as f: f.write(content)
         messagebox.showinfo('Сохранено', 'Файл сохранён')
 
+    # ---- Новое: Поиск рикошетов по файлу ----
+    def _normalize_num_str(self, v):
+        # Приводим число/строку к каноничному строковому виду: если целое — без .0
+        try:
+            f = float(v)
+            if abs(f - int(f)) < 1e-9:
+                return str(int(f))
+            return str(f)
+        except:
+            return str(v).strip()
+
+    def _get_ricochet_sequence_for_angle(self, angle_deg):
+        origin = {'x':0,'z':0}
+        angle = math.radians(angle_deg)
+        dir = {'x': math.cos(angle), 'z': math.sin(angle)}
+        maxB = None if self.laser_unlimited else int(self.laser_max_bounces)
+        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments':[{'a':origin,'b':v_add(origin,v_scale(dir,self.laser_length))}], 'hits': []}
+        numbers = []
+        for hit in cast['hits']:
+            if hit.get('strokeIndex') is None or not self.tags: continue
+            for t in self.tags:
+                if t.get('strokeIndex') != hit.get('strokeIndex'): continue
+                if self.point_on_segment(hit['point'], t['a'], t['b'], 1e-4):
+                    numbers.append(self._normalize_num_str(t['number']))
+                    break
+        return numbers
+
+    def search_ricochet_file(self):
+        # Нажатие кнопки: старт/стоп поиска
+        if self._search_running:
+            # отмена
+            self._search_running = False
+            self.search_btn.config(text='Поиск рикошетов')
+            return
+        fn = filedialog.askopenfilename(filetypes=[('TXT','*.txt'), ('All','*.*')])
+        if not fn: return
+        try:
+            with open(fn, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            messagebox.showerror('Ошибка', 'Не могу прочитать файл'); return
+        tokens = re.findall(r'[-+]?\d*\.?\d+', content)
+        if not tokens:
+            messagebox.showerror('Ошибка', 'В файле не найдено чисел'); return
+        target = [self._normalize_num_str(t) for t in tokens]
+        self._search_target = target
+        # Инициализация поиска
+        self._search_running = True
+        self._search_initial_angle = float(self.laser_angle_deg) % 360
+        self._search_steps_done = 0
+        # optional: allow changing step
+        try:
+            step = simpledialog.askfloat('Шаг поиска (градусы)', 'Введите шаг вращения в градусах (меньше=медленнее, более точнее):', initialvalue=self._search_step_deg, minvalue=0.01, maxvalue=90.0)
+            if step is not None:
+                self._search_step_deg = float(step)
+        except:
+            pass
+        self.search_btn.config(text='Отменить поиск')
+        # запустить шаги
+        self._search_step()
+
+    def _search_step(self):
+        if not self._search_running:
+            return
+        step = self._search_step_deg
+        steps_done = self._search_steps_done
+        angle = (self._search_initial_angle + steps_done * step) % 360
+        # обновляем визуально угол
+        self.laser_angle_deg = angle
+        try:
+            self.rotate_scale.set(angle)
+        except:
+            pass
+        self.render()
+        seq = self._get_ricochet_sequence_for_angle(angle)
+        # сравнение последовательностей как списков строк
+        if seq == self._search_target:
+            self._search_running = False
+            self.search_btn.config(text='Поиск рикошетов')
+            messagebox.showinfo('Найдено', f'Комбинация найдена при угле {angle:.3f}°')
+            return
+        # увеличиваем шаг
+        self._search_steps_done += 1
+        # если сделали полный оборот — останов
+        if (self._search_steps_done * step) >= 360 - 1e-9:
+            self._search_running = False
+            self.search_btn.config(text='Поиск рикошетов')
+            messagebox.showinfo('Не найдено', 'Комбинация не найдена за 360° оборот.')
+            return
+        # иначе планируем следующий шаг
+        # задержка небольшая, чтобы GUI не блокировался. Пользователь может отменить нажатием кнопки.
+        self.root.after(10, self._search_step)
+
     # ---- Helper small wrappers ----
     def goto_cam(self):
         try:
@@ -930,6 +1026,47 @@ class LaserApp:
 
 # ---- Main ----
 if __name__ == '__main__':
-    root = tk.Tk()
+    import sys
+
+    # Создаём корень tkinter (подстраховка на случай, если в файле не использовался псевдоним tk)
+    try:
+        root = tk.Tk()
+    except NameError:
+        from tkinter import Tk as _Tk
+        root = _Tk()
+
+    # Инициализируем приложение
+    try:
+        app = LaserApp(root)
+    except Exception as e:
+        print('Ошибка при создании приложения:', e)
+        raise
+
+    # Гладкое закрытие: если у приложения есть метод on_close — используем его,
+    # иначе просто разрушаем окно при закрытии.
+    if hasattr(app, 'on_close') and callable(app.on_close):
+        root.protocol("WM_DELETE_WINDOW", app.on_close)
+    else:
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
+
+    # Опционально: можно передать файл с аргумента командной строки
+    # если ваш код поддерживает загрузку через метод load_ricochets или похожий,
+    # раскомментируйте и поправьте название метода:
+    # if len(sys.argv) > 1:
+    #     try:
+    #         app.load_ricochets(sys.argv[1])
+    #     except Exception as e:
+    #         print('Не удалось загрузить входной файл:', e)
+
+    # Запуск основного цикла
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        # Если запущено в терминале и пользователь прерывает Ctrl+C
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
     app = LaserApp(root)
     root.mainloop()
