@@ -846,8 +846,8 @@ class LaserApp:
         self.erase_btn.config(text=f"Ластик: {'Вкл' if self.is_erasing else 'Выкл'}")
         if self.is_erasing: self.is_framing = False; self.frame_btn.config(text='Режим рамки: Выкл')
 
-    def apply_number_from_frame(self):
-        self.apply_number_from_frame()
+    #def apply_number_from_frame(self):
+    #    self.apply_number_from_frame()
 
     # ---- Procedural assignment ----
     def procedural_assign_prompt(self):
