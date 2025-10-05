@@ -1,25 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Laser—рикошеты (Tkinter, PIL)
-
-Добавлена кнопка "Поиск рикошетов":
-- Открывает текстовый файл с набором чисел (например "1 2 3 4 5").
-- Вращает лазер по углу от текущего значения на шаг 1° (настраиваемо) до полного оборота или пока не найдётся комбинация рикошетов,
-  генерирующая ту же последовательность чисел. Когда найдено — поиск останавливается и угол лазера устанавливается.
-
-Остальной функционал не изменён.
-
-Запуск: сохранить в файл laser_ricochet.py и запустить: python laser_ricochet.py
-"""
-
 import tkinter as tk
 from tkinter import ttk, colorchooser, filedialog, simpledialog, messagebox
 from PIL import Image, ImageTk, ImageOps
-import math, random, json, time, io, re
+import math, random, json, time, io, re, sys
 
 # ---- Вспомогательные векторы ----
-
 def v_add(a, b): return {'x': a['x']+b['x'], 'z': a['z']+b['z']}
 def v_sub(a, b): return {'x': a['x']-b['x'], 'z': a['z']-b['z']}
 def v_scale(a, s): return {'x': a['x']*s, 'z': a['z']*s}
@@ -31,7 +15,7 @@ def v_norm(a):
 def v_perp(a): return {'x': -a['z'], 'z': a['x']}
 def cross2(a, b): return a['x']*b['z'] - a['z']*b['x']
 
-# ------- Приложение -------
+# ---- Приложение ----
 class LaserApp:
     def __init__(self, root):
         self.root = root
@@ -139,19 +123,29 @@ class LaserApp:
         laser_fr = ttk.LabelFrame(top, text='Лазер')
         laser_fr.pack(side='left', padx=6, pady=6)
         ttk.Label(laser_fr, text='Длина').grid(row=0, column=0)
-        self.laser_len_entry = ttk.Entry(laser_fr, width=6)
+        self.laser_len_entry = ttk.Entry(laser_fr, width=8)
         self.laser_len_entry.grid(row=0, column=1)
         self.laser_len_entry.insert(0, str(int(self.laser_length)))
+        # OK button for laser length
+        ttk.Button(laser_fr, text='OK', command=self.apply_laser_length).grid(row=0, column=2, padx=(4,0))
+
         ttk.Label(laser_fr, text='Угол').grid(row=1, column=0)
         self.laser_angle_scale = ttk.Scale(laser_fr, from_=0, to=360, command=self._on_laser_angle)
         self.laser_angle_scale.set(self.laser_angle_deg)
-        self.laser_angle_scale.grid(row=1, column=1)
+        self.laser_angle_scale.grid(row=1, column=1, columnspan=2, sticky='we')
         self.laser_reflect_var = tk.BooleanVar(value=self.laser_reflect)
-        ttk.Checkbutton(laser_fr, text='Отражения', variable=self.laser_reflect_var, command=self.toggle_laser_reflect).grid(row=2, column=0, columnspan=2)
-        ttk.Button(laser_fr, text='Без лимита', command=self.toggle_laser_unlimited).grid(row=3, column=0)
-        self.laser_bounces_entry = ttk.Entry(laser_fr, width=6)
+        ttk.Checkbutton(laser_fr, text='Отражения', variable=self.laser_reflect_var, command=self.toggle_laser_reflect).grid(row=2, column=0, columnspan=3)
+        ttk.Button(laser_fr, text='Без лимита', command=self.toggle_laser_unlimited).grid(row=3, column=0, pady=4)
+
+        # bounces entry + OK
+        self.laser_bounces_entry = ttk.Entry(laser_fr, width=8)
         self.laser_bounces_entry.grid(row=3, column=1)
         self.laser_bounces_entry.insert(0, str(self.laser_max_bounces))
+        ttk.Button(laser_fr, text='OK', command=self.apply_laser_bounces).grid(row=3, column=2, padx=(4,0))
+
+        # bind Enter key in these entries
+        self.laser_len_entry.bind('<Return>', lambda ev: self.apply_laser_length())
+        self.laser_bounces_entry.bind('<Return>', lambda ev: self.apply_laser_bounces())
 
         # Modes and tags
         modes_fr = ttk.Frame(top)
@@ -391,13 +385,12 @@ class LaserApp:
         rect = self.image_obj['world_rect']
         a = self.world_to_screen(rect['minX'], rect['minZ'])
         b = self.world_to_screen(rect['maxX'], rect['maxZ'])
-        w = b['x'] - a['x']; h = b['y'] - a['y']
         try:
             img = ImageTk.PhotoImage(self.image_obj['canvas_img'])
             # keep ref
             self.canvas.image_ref = img
             self.canvas.create_image(a['x'], a['y'], anchor='nw', image=img)
-        except Exception as e:
+        except Exception:
             pass
 
     # ---- Rendering ----
@@ -730,7 +723,7 @@ class LaserApp:
         with open(fn, 'r', encoding='utf-8') as f:
             try:
                 data = json.load(f)
-            except Exception as e:
+            except Exception:
                 messagebox.showerror('Ошибка', 'Не могу прочитать JSON'); return
         if not isinstance(data, dict) or 'strokes' not in data or 'tags' not in data:
             messagebox.showerror('Ошибка', 'Неверный формат файла'); return
@@ -826,31 +819,65 @@ class LaserApp:
         self.laser_reflect = bool(self.laser_reflect_var.get()); self.render()
     def toggle_laser_unlimited(self):
         self.laser_unlimited = not self.laser_unlimited
-        if self.laser_unlimited: self.laser_len_entry.config(state='disabled')
-        else: self.laser_len_entry.config(state='normal')
+        if self.laser_unlimited:
+            self.laser_len_entry.config(state='disabled')
+        else:
+            self.laser_len_entry.config(state='normal')
         self.render()
+
+    # Новые методы: применить значения из полей
+    def apply_laser_length(self):
+        try:
+            val = float(self.laser_len_entry.get())
+            if val <= 0:
+                raise ValueError()
+            self.laser_length = val
+            # обновим визуально поле (целое если можно)
+            if abs(self.laser_length - int(self.laser_length)) < 1e-9:
+                self.laser_len_entry.delete(0, 'end'); self.laser_len_entry.insert(0, str(int(self.laser_length)))
+            else:
+                self.laser_len_entry.delete(0, 'end'); self.laser_len_entry.insert(0, str(self.laser_length))
+            self.render()
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректную длину лазера (число > 0).')
+
+    def apply_laser_bounces(self):
+        try:
+            val = int(float(self.laser_bounces_entry.get()))
+            if val < 0:
+                raise ValueError()
+            self.laser_max_bounces = val
+            self.laser_bounces_entry.delete(0, 'end'); self.laser_bounces_entry.insert(0, str(self.laser_max_bounces))
+            self.render()
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректное количество рикошетов (целое >= 0).')
 
     # ---- Color / brush ----
     def pick_color(self):
         c = colorchooser.askcolor(color=self.current_color)
-        if c and c[1]: self.current_color = c[1]; self.color_preview.config(bg=self.current_color)
+        if c and c[1]:
+            self.current_color = c[1]; self.color_preview.config(bg=self.current_color)
+
     def apply_brush(self):
         try:
             self.brush_size = max(1, int(self.brush_entry.get()))
-        except: self.brush_size = 1
+        except:
+            self.brush_size = 1
 
     # ---- Modes ----
     def toggle_frame_mode(self):
         self.is_framing = not self.is_framing
         self.frame_btn.config(text=f"Режим рамки: {'Вкл' if self.is_framing else 'Выкл'}")
-        if self.is_framing: self.is_erasing = False; self.erase_btn.config(text='Ластик')
+        if self.is_framing:
+            self.is_erasing = False; self.erase_btn.config(text='Ластик')
     def toggle_draw(self):
         self.drawing_enabled = not self.drawing_enabled
         self.draw_btn.config(text=f"Рисование: {'Вкл' if self.drawing_enabled else 'Выкл'}")
     def toggle_eraser(self):
         self.is_erasing = not self.is_erasing
         self.erase_btn.config(text=f"Ластик: {'Вкл' if self.is_erasing else 'Выкл'}")
-        if self.is_erasing: self.is_framing = False; self.frame_btn.config(text='Режим рамки: Выкл')
+        if self.is_erasing:
+            self.is_framing = False; self.frame_btn.config(text='Режим рамки: Выкл')
 
     # ---- Procedural assignment ----
     def procedural_assign_prompt(self):
@@ -958,7 +985,7 @@ class LaserApp:
         try:
             with open(fn, 'r', encoding='utf-8') as f:
                 content = f.read()
-        except Exception as e:
+        except Exception:
             messagebox.showerror('Ошибка', 'Не могу прочитать файл'); return
         tokens = re.findall(r'[-+]?\d*\.?\d+', content)
         if not tokens:
@@ -1017,17 +1044,9 @@ class LaserApp:
         try:
             self.camX = float(self.x_entry.get()); self.camZ = float(self.z_entry.get()); self.render()
         except: pass
-    def pick_color(self):
-        c = colorchooser.askcolor(color=self.current_color)
-        if c and c[1]: self.current_color = c[1]; self.color_preview.config(bg=self.current_color)
-    def remove_image(self):
-        if self.image_obj and not messagebox.askyesno('Удалить изображение', 'Удалить изображение?'): return
-        self.image_obj = None; self.render()
 
 # ---- Main ----
 if __name__ == '__main__':
-    import sys
-
     # Создаём корень tkinter (подстраховка на случай, если в файле не использовался псевдоним tk)
     try:
         root = tk.Tk()
@@ -1042,31 +1061,17 @@ if __name__ == '__main__':
         print('Ошибка при создании приложения:', e)
         raise
 
-    # Гладкое закрытие: если у приложения есть метод on_close — используем его,
-    # иначе просто разрушаем окно при закрытии.
+    # Гладкое закрытие
     if hasattr(app, 'on_close') and callable(app.on_close):
         root.protocol("WM_DELETE_WINDOW", app.on_close)
     else:
         root.protocol("WM_DELETE_WINDOW", root.destroy)
 
-    # Опционально: можно передать файл с аргумента командной строки
-    # если ваш код поддерживает загрузку через метод load_ricochets или похожий,
-    # раскомментируйте и поправьте название метода:
-    # if len(sys.argv) > 1:
-    #     try:
-    #         app.load_ricochets(sys.argv[1])
-    #     except Exception as e:
-    #         print('Не удалось загрузить входной файл:', e)
-
-    # Запуск основного цикла
     try:
         root.mainloop()
     except KeyboardInterrupt:
-        # Если запущено в терминале и пользователь прерывает Ctrl+C
         try:
             root.destroy()
         except Exception:
             pass
         sys.exit(0)
-    app = LaserApp(root)
-    root.mainloop()
