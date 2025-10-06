@@ -172,13 +172,17 @@ class LaserApp:
 
         ttk.Button(modes_fr, text='Процедурно расставить', command=self.procedural_assign_prompt).grid(row=3, column=0, columnspan=3, pady=4)
 
-        # Новая кнопка: Поиск рикошетов
+        # Нажмите сюда: Поиск рикошетов (рядом будет кнопка скачивания)
         self.search_btn = ttk.Button(modes_fr, text='Поиск рикошетов', command=self.search_ricochet_file)
-        self.search_btn.grid(row=4, column=0, columnspan=3, pady=4)
+        self.search_btn.grid(row=4, column=0, columnspan=2, pady=4, sticky='w')
+
+        # Новая кнопка: Скачать рикошеты (в одну колонку .txt)
+        self.download_btn = ttk.Button(modes_fr, text='Скачать рикошеты', command=self.download_ricochets)
+        self.download_btn.grid(row=4, column=2, pady=4, padx=(6,0))
 
         # Новая кнопка: Показать рикошеты (открывает окно)
         self.show_hits_btn = ttk.Button(modes_fr, text='Показать рикошеты', command=self.toggle_show_ricochets)
-        self.show_hits_btn.grid(row=5, column=0, columnspan=3, pady=4)
+        self.show_hits_btn.grid(row=4, column=0, columnspan=3, pady=4)
 
         # Image controls
         img_fr = ttk.LabelFrame(top, text='Изображение (стена)')
@@ -955,25 +959,35 @@ class LaserApp:
 
     # ---- Download ricochets (save numbers from intersections) ----
     def download_ricochets(self):
-        origin = {'x':0,'z':0}
+        origin = {'x': 0, 'z': 0}
         angle = math.radians(self.laser_angle_deg)
         dir = {'x': math.cos(angle), 'z': math.sin(angle)}
         maxB = None if self.laser_unlimited else int(self.laser_max_bounces)
-        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments':[{'a':origin,'b':v_add(origin,v_scale(dir,self.laser_length))}], 'hits': []}
+        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments':[{'a':origin,'b':v_add(origin,v_scale(dir,self.laser_length))}], 'hits':[]}
+
         numbers = []
         for hit in cast['hits']:
-            if hit.get('strokeIndex') is None or not self.tags: continue
-            matched = False
+            if hit.get('strokeIndex') is None or not self.tags:
+                continue
             for t in self.tags:
-                if t.get('strokeIndex') != hit.get('strokeIndex'): continue
+                if t.get('strokeIndex') != hit.get('strokeIndex'):
+                    continue
                 if self.point_on_segment(hit['point'], t['a'], t['b'], 1e-4):
-                    numbers.append(str(t['number'])); matched = True; break
+                    numbers.append(str(t['number']))
+                    break
+
         if not numbers:
-            if not messagebox.askyesno('Не найдено', 'Не найдено рикошетов по помеченным отрезкам. Скачать пустой файл?'): return
-        content = ' '.join(numbers)
+            if not messagebox.askyesno('Не найдено', 'Не найдено рикошетов по помеченным отрезкам. Скачать пустой файл?'):
+                return
+
+        # Записываем в файл — одна строка = одно число (одна колонка)
+        content = '\n'.join(numbers)
+
         fn = filedialog.asksaveasfilename(defaultextension='.txt', filetypes=[('TXT','*.txt')])
-        if not fn: return
-        with open(fn, 'w', encoding='utf-8') as f: f.write(content)
+        if not fn:
+            return
+        with open(fn, 'w', encoding='utf-8') as f:
+            f.write(content)
         messagebox.showinfo('Сохранено', 'Файл сохранён')
 
     # ---- Новое: Поиск рикошетов по файлу ----
