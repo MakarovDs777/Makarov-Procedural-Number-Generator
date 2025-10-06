@@ -1091,20 +1091,57 @@ class LaserApp:
             self._open_ricochet_window()
 
     def _open_ricochet_window(self):
-        if self.ricochet_window: return
+        if self.ricochet_window:
+            return
         w = tk.Toplevel(self.root)
         w.title('Рикошеты (в реальном времени)')
-        w.geometry('300x100')
+        w.geometry('500x90')
         w.transient(self.root)
-        lbl = ttk.Label(w, textvariable=self.ricochet_var, font=('Arial', 14))
-        lbl.pack(fill='both', expand=True, padx=8, pady=8)
-        # при закрытии окна — очистим ссылку и обновим кнопку
+
+        # Однострочное поле для отображения рикошетов — можно копировать
+        entry = ttk.Entry(w, textvariable=self.ricochet_var, font=('Arial', 12))
+        entry.pack(fill='x', expand=True, padx=8, pady=(8, 4))
+        # Сделаем поле readonly — текст обновляется через StringVar, но пользователь может выделять и копировать
+        entry.state(['readonly'])
+
+        # Удобные бинды: Ctrl+A для выделения всего и при фокусе — выделять автоматически
+        def _select_all(event=None):
+            try:
+                entry.selection_range(0, 'end')
+                return 'break'
+            except Exception:
+                return None
+
+        entry.bind('<Control-a>', _select_all)
+        entry.bind('<Control-A>', _select_all)
+        entry.bind('<FocusIn>', lambda e: w.after(1, _select_all))
+
+        # Кнопка копирования в буфер обмена (на случай, если кто-то предпочитает нажать кнопку)
+        def _copy_to_clipboard():
+            txt = self.ricochet_var.get()
+            if txt is None:
+                txt = ''
+            try:
+                w.clipboard_clear()
+                w.clipboard_append(txt)
+                # опционально: краткое уведомление
+                # messagebox.showinfo('Скопировано', 'Рикошеты скопированы в буфер обмена.')
+            except Exception:
+                pass
+
+        btn_fr = ttk.Frame(w)
+        btn_fr.pack(fill='x', padx=8, pady=(0,8))
+        ttk.Button(btn_fr, text='Копировать', command=_copy_to_clipboard).pack(side='right')
+
+        # при закрытии — корректно очищаем ссылку и обновляем кнопку
         def on_close():
             self._close_ricochet_window()
         w.protocol("WM_DELETE_WINDOW", on_close)
+
         self.ricochet_window = w
         self.show_hits_btn.config(text='Скрыть рикошеты')
-        # Заполним начальное значение
+
+        # Заполним начально текущее значение (render() уже обновляет self.ricochet_var)
         self.render()
 
     def _close_ricochet_window(self):
