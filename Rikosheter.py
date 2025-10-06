@@ -66,6 +66,10 @@ class LaserApp:
         self._search_initial_angle = None
         self._search_steps_done = 0
 
+        # Окно рикошетов (новое)
+        self.ricochet_window = None
+        self.ricochet_var = tk.StringVar(value='')  # будет содержать строку "1 2 3 ..."
+
         # UI
         self._build_ui()
 
@@ -171,6 +175,10 @@ class LaserApp:
         # Новая кнопка: Поиск рикошетов
         self.search_btn = ttk.Button(modes_fr, text='Поиск рикошетов', command=self.search_ricochet_file)
         self.search_btn.grid(row=4, column=0, columnspan=3, pady=4)
+
+        # Новая кнопка: Показать рикошеты (открывает окно)
+        self.show_hits_btn = ttk.Button(modes_fr, text='Показать рикошеты', command=self.toggle_show_ricochets)
+        self.show_hits_btn.grid(row=5, column=0, columnspan=3, pady=4)
 
         # Image controls
         img_fr = ttk.LabelFrame(top, text='Изображение (стена)')
@@ -402,6 +410,7 @@ class LaserApp:
         #self.draw_grid(self.canvas)
         self.draw_image_if_any(self.canvas)
         self.draw_strokes(self.canvas)
+        current_seq_str = ''
         if self.laser_visible:
             origin = {'x':0.0,'z':0.0}
             angle = math.radians(self.laser_angle_deg)
@@ -421,9 +430,30 @@ class LaserApp:
             originS = self.world_to_screen(0,0)
             self.canvas.create_line(originS['x']-8, originS['y'], originS['x']+8, originS['y'], fill='#000000', width=1)
             self.canvas.create_line(originS['x'], originS['y']-8, originS['x'], originS['y']+8, fill='#000000', width=1)
+
+            # --- Сформировать строку рикошетов из cast['hits'] ---
+            seq = []
+            for hit in cast.get('hits', []):
+                if hit.get('strokeIndex') is None or not self.tags: continue
+                for t in self.tags:
+                    if t.get('strokeIndex') != hit.get('strokeIndex'): continue
+                    if self.point_on_segment(hit['point'], t['a'], t['b'], 1e-4):
+                        seq.append(self._normalize_num_str(t['number']))
+                        break
+            current_seq_str = ' '.join(seq)
+
         if self.frame and self.frame.get('active'):
             self.draw_frame(self.canvas)
         self.draw_tags(self.canvas)
+
+        # Обновляем окно рикошетов (если оно открыто)
+        if self.ricochet_window:
+            try:
+                # self.ricochet_var используется как текст в окне
+                self.ricochet_var.set(current_seq_str)
+            except Exception:
+                # в случае ошибки просто игнорируем (без падения)
+                pass
 
     # ---- Geometry intersections (перенесено из JS) ----
     def intersect_ray_segment(self, P, r, Q, Rseg):
@@ -1038,6 +1068,40 @@ class LaserApp:
         # иначе планируем следующий шаг
         # задержка небольшая, чтобы GUI не блокировался. Пользователь может отменить нажатием кнопки.
         self.root.after(10, self._search_step)
+
+    # ---- Новое: управление окном рикошетов ----
+    def toggle_show_ricochets(self):
+        if self.ricochet_window:
+            self._close_ricochet_window()
+        else:
+            self._open_ricochet_window()
+
+    def _open_ricochet_window(self):
+        if self.ricochet_window: return
+        w = tk.Toplevel(self.root)
+        w.title('Рикошеты (в реальном времени)')
+        w.geometry('300x100')
+        w.transient(self.root)
+        lbl = ttk.Label(w, textvariable=self.ricochet_var, font=('Arial', 14))
+        lbl.pack(fill='both', expand=True, padx=8, pady=8)
+        # при закрытии окна — очистим ссылку и обновим кнопку
+        def on_close():
+            self._close_ricochet_window()
+        w.protocol("WM_DELETE_WINDOW", on_close)
+        self.ricochet_window = w
+        self.show_hits_btn.config(text='Скрыть рикошеты')
+        # Заполним начальное значение
+        self.render()
+
+    def _close_ricochet_window(self):
+        if not self.ricochet_window: return
+        try:
+            self.ricochet_window.destroy()
+        except:
+            pass
+        self.ricochet_window = None
+        self.ricochet_var.set('')
+        self.show_hits_btn.config(text='Показать рикошеты')
 
     # ---- Helper small wrappers ----
     def goto_cam(self):
