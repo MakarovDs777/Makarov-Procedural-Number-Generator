@@ -3,19 +3,33 @@ from tkinter import ttk, colorchooser, filedialog, simpledialog, messagebox
 from PIL import Image, ImageTk, ImageOps
 import math, random, json, time, io, re, sys
 
-# ----Вспомогательные векторы----
-def v_add(a, b): return {'x': a['x'] + b['x'], 'z': a['z'] + b['z']}
-def v_sub(a, b): return {'x': a['x'] - b['x'], 'z': a['z'] - b['z']}
-def v_scale(a, s): return {'x': a['x'] * s, 'z': a['z'] * s}
-def v_dot(a, b): return a['x'] * b['x'] + a['z'] * b['z']
-def v_len(a): return math.hypot(a['x'], a['z'])
+# ---- Вспомогательные векторы ----
+def v_add(a, b):
+    return {'x': a['x'] + b['x'], 'z': a['z'] + b['z']}
+
+def v_sub(a, b):
+    return {'x': a['x'] - b['x'], 'z': a['z'] - b['z']}
+
+def v_scale(a, s):
+    return {'x': a['x'] * s, 'z': a['z'] * s}
+
+def v_dot(a, b):
+    return a['x'] * b['x'] + a['z'] * b['z']
+
+def v_len(a):
+    return math.hypot(a['x'], a['z'])
+
 def v_norm(a):
     L = v_len(a) or 1
     return {'x': a['x'] / L, 'z': a['z'] / L}
-def v_perp(a): return {'x': -a['z'], 'z': a['x']}
-def cross2(a, b): return a['x'] * b['z'] - a['z'] * b['x']
 
-# ----Приложение----
+def v_perp(a):
+    return {'x': -a['z'], 'z': a['x']}
+
+def cross2(a, b):
+    return a['x'] * b['z'] - a['z'] * b['x']
+
+# ---- Приложение ----
 class LaserApp:
     def __init__(self, root):
         self.root = root
@@ -28,7 +42,7 @@ class LaserApp:
         self.angleDeg = 0.0
         self._update_angle()
 
-        # Состояния
+        # Состояния рисования
         self.drawing_enabled = True
         self.is_drawing = False
         self.is_panning = False
@@ -56,7 +70,7 @@ class LaserApp:
         self.brush_size = 1
 
         # Изображение (маска)
-        self.image_obj = None  # dict with img,mask(u8array),w,h,pixel_world,world_rect
+        self.image_obj = None
         self.reflect_lum_threshold = 200
         self.sat_threshold = 0.15
         self.image_reflect_color = True
@@ -70,8 +84,17 @@ class LaserApp:
 
         # Окно рикошетов (новое)
         self.ricochet_window = None
-        self.ricochet_var = tk.StringVar(value='')   # будет содержать строку "1 2 3 ..."
-        self.ricochet_count_var = tk.StringVar(value='0')  # количество рикошетов
+        self.ricochet_var = tk.StringVar(value='')
+        self.ricochet_count_var = tk.StringVar(value='0')
+
+        # ---- Новое: частичная прогрузка ----
+        self.partial_load_enabled = False
+        self.partial_load_per_interval = 1  # сколько рикошетов/шаг показывать
+        self.partial_load_interval = 0.1  # секунды (интервал между шагами)
+        self._partial_cast_cache = None  # кэш вызова cast_laser: {'segments':..., 'hits':...}
+        self._partial_visible_hits = 0
+        self._partial_visible_segments = 0
+        self._partial_task_id = None  # id for after scheduling
 
         # UI
         self._build_ui()
@@ -82,7 +105,7 @@ class LaserApp:
         # Initial render
         self.render()
 
-    # ----UI----
+    # ---- UI ----
     def _build_ui(self):
         top = ttk.Frame(self.root)
         top.pack(side='top', fill='x')
@@ -134,23 +157,41 @@ class LaserApp:
         self.laser_len_entry.grid(row=0, column=1)
         self.laser_len_entry.insert(0, str(int(self.laser_length)))
         ttk.Button(laser_fr, text='OK', command=self.apply_laser_length).grid(row=0, column=2, padx=(4, 0))
+
         ttk.Label(laser_fr, text='Угол').grid(row=1, column=0)
         self.laser_angle_scale = ttk.Scale(laser_fr, from_=0, to=360, command=self._on_laser_angle)
         self.laser_angle_scale.set(self.laser_angle_deg)
         self.laser_angle_scale.grid(row=1, column=1, columnspan=2, sticky='we')
+
         self.laser_reflect_var = tk.BooleanVar(value=self.laser_reflect)
-        ttk.Checkbutton(laser_fr, text='Отражения', variable=self.laser_reflect_var,
-                        command=self.toggle_laser_reflect).grid(row=2, column=0, columnspan=3)
+        ttk.Checkbutton(laser_fr, text='Отражения', variable=self.laser_reflect_var, command=self.toggle_laser_reflect).grid(row=2, column=0, columnspan=3)
         ttk.Button(laser_fr, text='Без лимита', command=self.toggle_laser_unlimited).grid(row=3, column=0, pady=4)
 
-        # bounces entry+OK
+        # bounces entry + OK
         self.laser_bounces_entry = ttk.Entry(laser_fr, width=8)
         self.laser_bounces_entry.grid(row=3, column=1)
         self.laser_bounces_entry.insert(0, str(self.laser_max_bounces))
         ttk.Button(laser_fr, text='OK', command=self.apply_laser_bounces).grid(row=3, column=2, padx=(4, 0))
+
         # bind Enter key in these entries
         self.laser_len_entry.bind('<Return>', lambda ev: self.apply_laser_length())
         self.laser_bounces_entry.bind('<Return>', lambda ev: self.apply_laser_bounces())
+
+        # ---- Новое (частичная прогрузка) ----
+        self.partial_btn = ttk.Button(laser_fr, text='Прогружать частично: Выкл', command=self.toggle_partial_load)
+        self.partial_btn.grid(row=4, column=0, pady=(6, 2), columnspan=1)
+        ttk.Label(laser_fr, text='шт/шаг:').grid(row=4, column=1, sticky='e')
+        self.partial_count_entry = ttk.Entry(laser_fr, width=6)
+        self.partial_count_entry.grid(row=4, column=2, sticky='w')
+        self.partial_count_entry.insert(0, str(self.partial_load_per_interval))
+        ttk.Label(laser_fr, text='Интервал (с):').grid(row=5, column=0, sticky='e')
+        self.partial_interval_entry = ttk.Entry(laser_fr, width=6)
+        self.partial_interval_entry.grid(row=5, column=1, sticky='w')
+        self.partial_interval_entry.insert(0, str(self.partial_load_interval))
+        ttk.Button(laser_fr, text='Применить', command=self.apply_partial_params).grid(row=5, column=2, padx=(4, 0))
+        # bind Enter for partial fields
+        self.partial_count_entry.bind('<Return>', lambda ev: self.apply_partial_params())
+        self.partial_interval_entry.bind('<Return>', lambda ev: self.apply_partial_params())
 
         # Modes and tags
         modes_fr = ttk.Frame(top)
@@ -169,17 +210,14 @@ class LaserApp:
         ttk.Button(modes_fr, text='Очистить метки', command=self.clear_tags).grid(row=2, column=0)
         ttk.Button(modes_fr, text='Экспорт TXT', command=self.export_txt).grid(row=2, column=1)
         ttk.Button(modes_fr, text='Импорт TXT', command=self.import_txt).grid(row=2, column=2)
-        ttk.Button(modes_fr, text='Процедурно расставить', command=self.procedural_assign_prompt).grid(
-            row=3, column=0, columnspan=3, pady=4)
+        ttk.Button(modes_fr, text='Процедурно расставить', command=self.procedural_assign_prompt).grid(row=3, column=0, columnspan=3, pady=4)
 
         # Поиск рикошетов
         self.search_btn = ttk.Button(modes_fr, text='Поиск рикошетов', command=self.search_ricochet_file)
         self.search_btn.grid(row=4, column=0, columnspan=2, pady=4, sticky='w')
-
         # Скачать рикошеты
         self.download_btn = ttk.Button(modes_fr, text='Скачать рикошеты', command=self.download_ricochets)
         self.download_btn.grid(row=4, column=2, pady=4, padx=(6, 0))
-
         # Показать рикошеты (окно)
         self.show_hits_btn = ttk.Button(modes_fr, text='Показать рикошеты', command=self.toggle_show_ricochets)
         self.show_hits_btn.grid(row=4, column=0, columnspan=3, pady=4)
@@ -197,15 +235,14 @@ class LaserApp:
         self.sat_scale.set(int(self.sat_threshold * 100))
         self.sat_scale.grid(row=2, column=1)
         self.image_colorvar = tk.BooleanVar(value=self.image_reflect_color)
-        ttk.Checkbutton(img_fr, text='Цветные отражают', variable=self.image_colorvar,
-                        command=self._on_image_color_toggle).grid(row=3, column=0, columnspan=2)
+        ttk.Checkbutton(img_fr, text='Цветные отражают', variable=self.image_colorvar, command=self._on_image_color_toggle).grid(row=3, column=0, columnspan=2)
 
         # Status bar
         self.status_var = tk.StringVar(value='X:0 Z:0')
         status = ttk.Label(self.root, textvariable=self.status_var)
         status.pack(side='bottom', fill='x')
 
-    # ----Events/transforms----
+    # ---- Events / transforms ----
     def _bind_canvas_events(self):
         self.canvas.bind('<ButtonPress-1>', self.on_pointer_down)
         self.canvas.bind('<B1-Motion>', self.on_pointer_move)
@@ -257,7 +294,7 @@ class LaserApp:
         sy = cz + (vx * self.sinA + vz * self.cosA) * self.scale
         return {'x': sx, 'y': sy}
 
-    # ----Mouse handlers----
+    # ---- Mouse handlers ----
     def on_pointer_down(self, ev):
         sx, sy = ev.x, ev.y
         if self.is_framing or self.is_erasing:
@@ -306,12 +343,12 @@ class LaserApp:
         if self.is_drawing:
             self.is_drawing = False
             self.is_panning = False
-            if self.frame and self.frame.get('selecting'):
-                self.frame['selecting'] = False
+        if self.frame and self.frame.get('selecting'):
+            self.frame['selecting'] = False
             if self.is_erasing:
                 self.erase_strokes_in_frame(self.frame)
-                self.frame = None; self.is_erasing = False
-                self.render()
+            self.frame = None; self.is_erasing = False
+            self.render()
         elif self.is_framing:
             self.apply_number_from_frame(); self.frame = None; self.render()
         else:
@@ -355,10 +392,9 @@ class LaserApp:
                 self.tags = [x for x in self.tags if x['id'] != best['id']]
                 self.render()
 
-    # ----Drawing/utilities----
+    # ---- Drawing / utilities ----
     def draw_grid(self, ctx):
-        w = self.canvas.winfo_width(); h = self.canvas.winfo_height()
-        step = 1
+        w = self.canvas.winfo_width(); h = self.canvas.winfo_height(); step = 1
         lt = self.screen_to_world(0, 0); rb = self.screen_to_world(w, h)
         # light grid lines
         for x in range(math.floor(lt['x']), math.ceil(rb['x']) + 1):
@@ -375,8 +411,7 @@ class LaserApp:
             width = max(1, s['size'] * max(0.6, self.scale / 20))
             if len(pts) == 1:
                 p = self.world_to_screen(pts[0]['x'], pts[0]['z'])
-                ctx.create_oval(p['x'] - width / 2, p['y'] - width / 2, p['x'] + width / 2, p['y'] + width / 2,
-                                fill=s['color'], outline='')
+                ctx.create_oval(p['x'] - width / 2, p['y'] - width / 2, p['x'] + width / 2, p['y'] + width / 2, fill=s['color'], outline='')
                 continue
             coords = []
             for p in pts:
@@ -404,7 +439,6 @@ class LaserApp:
         if not self.image_obj: return
         rect = self.image_obj['world_rect']
         a = self.world_to_screen(rect['minX'], rect['minZ'])
-        # anchor top-left of image
         try:
             img = ImageTk.PhotoImage(self.image_obj['canvas_img'])
             # keep ref
@@ -413,42 +447,80 @@ class LaserApp:
         except Exception:
             pass
 
-    # ----Rendering----
+    # ---- Rendering ----
     def render(self):
         self.canvas.delete('all')
         # background
         self.canvas.create_rectangle(0, 0, self.canvas.winfo_width(), self.canvas.winfo_height(), fill='#ffffff', outline='')
-
         # self.draw_grid(self.canvas)  # (optional)
         self.draw_image_if_any(self.canvas)
         self.draw_strokes(self.canvas)
 
-        # Laser cast & draw
+        # Laser cast & draw current sequence string
         current_seq_str = ''
         if self.laser_visible:
             origin = {'x': 0.0, 'z': 0.0}
             angle = math.radians(self.laser_angle_deg)
             dir = {'x': math.cos(angle), 'z': math.sin(angle)}
-            maxB = None if self.laser_unlimited else int(self.laser_max_bounces)-1
-            cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {
-                'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
-            # draw segments
-            for seg in cast['segments']:
-                A = self.world_to_screen(seg['a']['x'], seg['a']['z'])
-                B = self.world_to_screen(seg['b']['x'], seg['b']['z'])
-                self.canvas.create_line(A['x'], A['y'], B['x'], B['y'], fill='#C81E1E', width=2, dash=(6, 4))
-            # draw hits
-            for h in cast['hits']:
-                p = self.world_to_screen(h['point']['x'], h['point']['z'])
-                color = '#50A028' if h.get('source') == 'image' else '#FFC828'
-                self.canvas.create_oval(p['x'] - 4, p['y'] - 4, p['x'] + 4, p['y'] + 4, fill=color, outline='')
-            originS = self.world_to_screen(0, 0)
-            self.canvas.create_line(originS['x'] - 8, originS['y'], originS['x'] + 8, originS['y'], fill='#000000', width=1)
-            self.canvas.create_line(originS['x'], originS['y'] - 8, originS['x'], originS['y'] + 8, fill='#000000', width=1)
+            maxB = None if self.laser_unlimited else int(self.laser_max_bounces) - 1
 
-            # Получаем текущую последовательность рикошетов через централизованную функцию
-            seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg)
-            current_seq_str = ' '.join(seq)
+            if self.partial_load_enabled:
+                # prepare cache if needed
+                if not self._partial_cast_cache:
+                    cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
+                    self._partial_cast_cache = cast
+                    self._partial_visible_hits = 0
+                    # segments: we will always show first segment even if no hits
+                    self._partial_visible_segments = 1 if cast.get('segments') else 0
+                cast = self._partial_cast_cache
+                segs = cast.get('segments', [])
+                hits = cast.get('hits', [])
+                # draw visible segments
+                for si in range(min(self._partial_visible_segments, len(segs))):
+                    seg = segs[si]
+                    A = self.world_to_screen(seg['a']['x'], seg['a']['z'])
+                    B = self.world_to_screen(seg['b']['x'], seg['b']['z'])
+                    self.canvas.create_line(A['x'], A['y'], B['x'], B['y'], fill='#C81E1E', width=2, dash=(6, 4))
+                # draw visible hits
+                for hi in range(min(self._partial_visible_hits, len(hits))):
+                    h = hits[hi]
+                    p = self.world_to_screen(h['point']['x'], h['point']['z'])
+                    color = '#50A028' if h.get('source') == 'image' else '#FFC828'
+                    self.canvas.create_oval(p['x'] - 4, p['y'] - 4, p['x'] + 4, p['y'] + 4, fill=color, outline='')
+                # origin cross
+                originS = self.world_to_screen(0, 0)
+                self.canvas.create_line(originS['x'] - 8, originS['y'], originS['x'] + 8, originS['y'], fill='#000000', width=1)
+                self.canvas.create_line(originS['x'], originS['y'] - 8, originS['x'], originS['y'] + 8, fill='#000000', width=1)
+
+                # sequence from visible hits only
+                numbers = []
+                for hi in range(min(self._partial_visible_hits, len(hits))):
+                    hit = hits[hi]
+                    if hit.get('strokeIndex') is None or not self.tags:
+                        continue
+                    for t in self.tags:
+                        if t.get('strokeIndex') != hit.get('strokeIndex'):
+                            continue
+                        if self.point_on_segment(hit['point'], t['a'], t['b'], 1e-4):
+                            numbers.append(self._normalize_num_str(t['number']))
+                            break
+                current_seq_str = ' '.join(numbers)
+
+            else:
+                cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
+                for seg in cast['segments']:
+                    A = self.world_to_screen(seg['a']['x'], seg['a']['z'])
+                    B = self.world_to_screen(seg['b']['x'], seg['b']['z'])
+                    self.canvas.create_line(A['x'], A['y'], B['x'], B['y'], fill='#C81E1E', width=2, dash=(6, 4))
+                for h in cast['hits']:
+                    p = self.world_to_screen(h['point']['x'], h['point']['z'])
+                    color = '#50A028' if h.get('source') == 'image' else '#FFC828'
+                    self.canvas.create_oval(p['x'] - 4, p['y'] - 4, p['x'] + 4, p['y'] + 4, fill=color, outline='')
+                originS = self.world_to_screen(0, 0)
+                self.canvas.create_line(originS['x'] - 8, originS['y'], originS['x'] + 8, originS['y'], fill='#000000', width=1)
+                self.canvas.create_line(originS['x'], originS['y'] - 8, originS['x'], originS['y'] + 8, fill='#000000', width=1)
+                seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg)
+                current_seq_str = ' '.join(seq)
 
         if self.frame and self.frame.get('active'):
             self.draw_frame(self.canvas)
@@ -457,13 +529,12 @@ class LaserApp:
         # Обновляем окно рикошетов (если оно открыто)
         if self.ricochet_window:
             try:
-                # Устанавливаем строку и счёт
                 self.ricochet_var.set(current_seq_str)
                 self.ricochet_count_var.set(str(len(current_seq_str.split())) if current_seq_str.strip() else '0')
             except Exception:
                 pass
 
-    # ----Geometry intersections (перенесено из JS)----
+    # ---- Geometry intersections (перенесено из JS) ----
     def intersect_ray_segment(self, P, r, Q, Rseg):
         s = v_sub(Rseg, Q)
         denom = cross2(r, s)
@@ -495,12 +566,14 @@ class LaserApp:
             if P['x'] < rect['minX'] or P['x'] > rect['maxX']: return None
         else:
             tx1 = (rect['minX'] - P['x']) / R['x']; tx2 = (rect['maxX'] - P['x']) / R['x']
-            ta = min(tx1, tx2); tb = max(tx1, tx2); tmin = max(tmin, ta); tmax = min(tmax, tb)
+            ta = min(tx1, tx2); tb = max(tx1, tx2)
+            tmin = max(tmin, ta); tmax = min(tmax, tb)
         if abs(R['z']) < EPS:
             if P['z'] < rect['minZ'] or P['z'] > rect['maxZ']: return None
         else:
             tz1 = (rect['minZ'] - P['z']) / R['z']; tz2 = (rect['maxZ'] - P['z']) / R['z']
-            ta = min(tz1, tz2); tb = max(tz1, tz2); tmin = max(tmin, ta); tmax = min(tmax, tb)
+            ta = min(tz1, tz2); tb = max(tz1, tz2)
+            tmin = max(tmin, ta); tmax = min(tmax, tb)
         if tmax < tmin: return None
         return {'tmin': tmin, 'tmax': tmax}
 
@@ -547,8 +620,7 @@ class LaserApp:
                         n = v_perp(R)
                     else:
                         n = {'x': n['x'] / nlen, 'z': n['z'] / nlen}
-                    if v_dot(R, n) > 0:
-                        n = v_scale(n, -1)
+                    if v_dot(R, n) > 0: n = v_scale(n, -1)
                     return {'t': tHit, 'point': hitPt, 'normal': n}
             t += step
         return None
@@ -605,7 +677,7 @@ class LaserApp:
             bounce += 1
         return {'segments': segs, 'hits': hits}
 
-    # ----Frame/tags/erase----
+    # ---- Frame / tags / erase ----
     def rect_from_frame_screen(self, f):
         xMin = min(f['x1'], f['x2']); xMax = max(f['x1'], f['x2'])
         yMin = min(f['y1'], f['y2']); yMax = max(f['y1'], f['y2'])
@@ -678,16 +750,13 @@ class LaserApp:
         return True
 
     def segment_rect_intersections_screen(self, A, B, rect):
-        edges = [
-            ({'x': rect['xMin'], 'y': rect['yMin']}, {'x': rect['xMax'], 'y': rect['yMin']}),
-            ({'x': rect['xMax'], 'y': rect['yMin']}, {'x': rect['xMax'], 'y': rect['yMax']}),
-            ({'x': rect['xMax'], 'y': rect['yMax']}, {'x': rect['xMin'], 'y': rect['yMax']}),
-            ({'x': rect['xMin'], 'y': rect['yMax']}, {'x': rect['xMin'], 'y': rect['yMin']})
-        ]
+        edges = [({'x': rect['xMin'], 'y': rect['yMin']}, {'x': rect['xMax'], 'y': rect['yMin']}),
+                 ({'x': rect['xMax'], 'y': rect['yMin']}, {'x': rect['xMax'], 'y': rect['yMax']}),
+                 ({'x': rect['xMax'], 'y': rect['yMax']}, {'x': rect['xMin'], 'y': rect['yMax']}),
+                 ({'x': rect['xMin'], 'y': rect['yMax']}, {'x': rect['xMin'], 'y': rect['yMin']})]
         inters = []
         for e in edges:
-            p = self.seg_seg_intersection({'x': A['x'], 'z': A['y']}, {'x': B['x'], 'z': B['y']},
-                                          {'x': e[0]['x'], 'z': e[0]['y']}, {'x': e[1]['x'], 'z': e[1]['y']})
+            p = self.seg_seg_intersection({'x': A['x'], 'z': A['y']}, {'x': B['x'], 'z': B['y']}, {'x': e[0]['x'], 'z': e[0]['y']}, {'x': e[1]['x'], 'z': e[1]['y']})
             if p:
                 ip = {'x': p['x'], 'y': p['z']}
                 if not any(math.hypot(q['x'] - ip['x'], q['y'] - ip['y']) < 1e-6 for q in inters):
@@ -718,12 +787,10 @@ class LaserApp:
                 B_in = (B_s['x'] >= rect['xMin'] and B_s['x'] <= rect['xMax'] and B_s['y'] >= rect['yMin'] and B_s['y'] <= rect['yMax'])
                 inters = self.segment_rect_intersections_screen(A_s, B_s, rect)
                 if (not A_in) and (not B_in) and len(inters) == 0:
-                    if not currentOutside:
-                        currentOutside.append({'x': A_w['x'], 'z': A_w['z']})
+                    if not currentOutside: currentOutside.append({'x': A_w['x'], 'z': A_w['z']})
                     currentOutside.append({'x': B_w['x'], 'z': B_w['z']})
                 elif (not A_in) and (not B_in) and len(inters) == 2:
-                    if not currentOutside:
-                        currentOutside.append({'x': A_w['x'], 'z': A_w['z']})
+                    if not currentOutside: currentOutside.append({'x': A_w['x'], 'z': A_w['z']})
                     I1w = self.screen_to_world(inters[0]['x'], inters[0]['y'])
                     I2w = self.screen_to_world(inters[1]['x'], inters[1]['y'])
                     currentOutside.append({'x': I1w['x'], 'z': I1w['z']})
@@ -750,13 +817,11 @@ class LaserApp:
                         currentOutside = [{'x': B_w['x'], 'z': B_w['z']}]
                 else:
                     pass
-                if currentOutside:
-                    outsidePolylines.append(currentOutside); currentOutside = []
+            if currentOutside: outsidePolylines.append(currentOutside); currentOutside = []
             for poly in outsidePolylines:
                 clean = []
                 for p in poly:
-                    if not clean:
-                        clean.append({'x': p['x'], 'z': p['z']})
+                    if not clean: clean.append({'x': p['x'], 'z': p['z']})
                     else:
                         last = clean[-1]
                         if math.hypot(last['x'] - p['x'], last['z'] - p['z']) > 1e-6:
@@ -768,10 +833,9 @@ class LaserApp:
                     newStrokes.append({'color': stroke['color'], 'size': stroke['size'], 'points': clean})
         self.strokes = newStrokes
 
-    # ----Export/import----
+    # ---- Export / import ----
     def export_txt(self):
-        out = {'strokes': [{'color': s['color'], 'size': s['size'], 'points': [[p['x'], p['z']] for p in s['points']]} for s in self.strokes],
-               'tags': [[t['a']['x'], t['a']['z'], t['b']['x'], t['b']['z'], t['number']] for t in self.tags]}
+        out = {'strokes': [{'color': s['color'], 'size': s['size'], 'points': [[p['x'], p['z']] for p in s['points']]} for s in self.strokes], 'tags': [[t['a']['x'], t['a']['z'], t['b']['x'], t['b']['z'], t['number']] for t in self.tags]}
         fn = filedialog.asksaveasfilename(defaultextension='.json', filetypes=[('JSON', '*.json'), ('TXT', '*.txt')])
         if not fn: return
         with open(fn, 'w', encoding='utf-8') as f:
@@ -805,7 +869,7 @@ class LaserApp:
             self.tags.append({'id': id, 'number': num, 'a': {'x': ax, 'z': az}, 'b': {'x': bx, 'z': bz}, 'strokeIndex': si})
         self.render()
 
-    # ----Tags assignment helpers----
+    # ---- Tags assignment helpers ----
     def find_stroke_index_containing_segment(self, A, B):
         for si, s in enumerate(self.strokes):
             if not s or 'points' not in s or len(s['points']) < 2: continue
@@ -816,17 +880,15 @@ class LaserApp:
         return None
 
     def clear_tags(self):
-        if not messagebox.askyesno('Очистить метки', 'Очистить все метки?'):
-            return
+        if not messagebox.askyesno('Очистить метки', 'Очистить все метки?'): return
         self.tags = []
         self.render()
 
     def clear_all(self):
-        if not messagebox.askyesno('Очистить всё', 'Очистить все рисунки и метки?'):
-            return
+        if not messagebox.askyesno('Очистить всё', 'Очистить все рисунки и метки?'): return
         self.strokes = []; self.tags = []; self.render()
 
-    # ----Image handling----
+    # ---- Image handling ----
     def prepare_image_mask(self, pil_img):
         img = pil_img.convert('RGB')
         W, H = img.size
@@ -847,10 +909,8 @@ class LaserApp:
         pixelWorld = targetWorldMax / maxPx
         widthWorld = W * pixelWorld; heightWorld = H * pixelWorld
         rect = {'minX': -widthWorld / 2, 'minZ': -heightWorld / 2, 'maxX': widthWorld / 2, 'maxZ': heightWorld / 2}
-        # store reduced/normalized image for displaying
         canvas_img = img.resize((W, H))
-        self.image_obj = {'img': img, 'mask': mask, 'w': W, 'h': H, 'pixel_world': pixelWorld, 'world_rect': rect,
-                          'canvas_img': canvas_img}
+        self.image_obj = {'img': img, 'mask': mask, 'w': W, 'h': H, 'pixel_world': pixelWorld, 'world_rect': rect, 'canvas_img': canvas_img}
 
     def load_image(self):
         fn = filedialog.askopenfilename(filetypes=[('Images', '*.png;*.jpg;*.jpeg;*.bmp')])
@@ -860,8 +920,7 @@ class LaserApp:
         self.render()
 
     def remove_image(self):
-        if self.image_obj and not messagebox.askyesno('Удалить изображение', 'Удалить изображение?'):
-            return
+        if self.image_obj and not messagebox.askyesno('Удалить изображение', 'Удалить изображение?'): return
         self.image_obj = None; self.render()
 
     def _on_lum(self, val):
@@ -880,14 +939,24 @@ class LaserApp:
         self.image_reflect_color = bool(self.image_colorvar.get())
         if self.image_obj: self.prepare_image_mask(self.image_obj['img']); self.render()
 
-    # ----Laser controls----
+    # ---- Laser controls ----
     def _on_laser_angle(self, val):
         try:
-            self.laser_angle_deg = float(val); self.render()
-        except: pass
+            self.laser_angle_deg = float(val)
+            # if partial loading enabled, restart partial animation with new angle
+            if self.partial_load_enabled:
+                self.start_partial_load()
+            else:
+                self.render()
+        except:
+            pass
 
     def toggle_laser_reflect(self):
-        self.laser_reflect = bool(self.laser_reflect_var.get()); self.render()
+        self.laser_reflect = bool(self.laser_reflect_var.get());
+        if self.partial_load_enabled:
+            self.start_partial_load()
+        else:
+            self.render()
 
     def toggle_laser_unlimited(self):
         self.laser_unlimited = not self.laser_unlimited
@@ -895,9 +964,11 @@ class LaserApp:
             self.laser_len_entry.config(state='disabled')
         else:
             self.laser_len_entry.config(state='normal')
-        self.render()
+        if self.partial_load_enabled:
+            self.start_partial_load()
+        else:
+            self.render()
 
-    # Новые методы: применить значения из полей
     def apply_laser_length(self):
         try:
             val = float(self.laser_len_entry.get())
@@ -907,7 +978,10 @@ class LaserApp:
                 self.laser_len_entry.delete(0, 'end'); self.laser_len_entry.insert(0, str(int(self.laser_length)))
             else:
                 self.laser_len_entry.delete(0, 'end'); self.laser_len_entry.insert(0, str(self.laser_length))
-            self.render()
+            if self.partial_load_enabled:
+                self.start_partial_load()
+            else:
+                self.render()
         except Exception:
             messagebox.showerror('Ошибка', 'Введите корректную длину лазера (число > 0).')
 
@@ -917,11 +991,118 @@ class LaserApp:
             if val < 0: raise ValueError()
             self.laser_max_bounces = val
             self.laser_bounces_entry.delete(0, 'end'); self.laser_bounces_entry.insert(0, str(self.laser_max_bounces))
-            self.render()
+            if self.partial_load_enabled:
+                self.start_partial_load()
+            else:
+                self.render()
         except Exception:
             messagebox.showerror('Ошибка', 'Введите корректное количество рикошетов (целое >= 0).')
 
-    # ----Color/brush----
+    # ---- Новое: частичная прогрузка управления ----
+    def apply_partial_params(self):
+        # читаем значения из полей и применяем (без включения/выключения)
+        try:
+            cnt = int(float(self.partial_count_entry.get()))
+            if cnt < 1: raise ValueError()
+            self.partial_load_per_interval = cnt
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректное количество рикошетов за шаг (целое >=1).')
+            return
+        try:
+            iv = float(self.partial_interval_entry.get())
+            if iv <= 0: raise ValueError()
+            self.partial_load_interval = iv
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректный интервал в секундах (>0).')
+            return
+        # если сейчас прогрузка активна, применим сразу (перезапустим)
+        if self.partial_load_enabled:
+            self.start_partial_load()
+
+    def toggle_partial_load(self):
+        self.partial_load_enabled = not self.partial_load_enabled
+        self.partial_btn.config(text=f"Прогружать частично: {'Вкл' if self.partial_load_enabled else 'Выкл'}")
+        if self.partial_load_enabled:
+            # start animation
+            self.start_partial_load()
+        else:
+            # stop and clear cache
+            self.stop_partial_load()
+            self.render()
+
+    def start_partial_load(self):
+        # cancel existing task if any
+        if self._partial_task_id:
+            try:
+                self.root.after_cancel(self._partial_task_id)
+            except Exception:
+                pass
+            self._partial_task_id = None
+        # recompute cast for current parameters
+        origin = {'x': 0.0, 'z': 0.0}
+        angle = math.radians(self.laser_angle_deg)
+        dir = {'x': math.cos(angle), 'z': math.sin(angle)}
+        maxB = None if self.laser_unlimited else int(self.laser_max_bounces) - 1
+        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
+        self._partial_cast_cache = cast
+        # reset visible counters: show first segment (origin->first hit/end) by default
+        self._partial_visible_segments = 1 if cast.get('segments') else 0
+        self._partial_visible_hits = 0
+        # schedule stepping
+        self._partial_step()
+
+    def stop_partial_load(self):
+        self._partial_cast_cache = None
+        self._partial_visible_hits = 0
+        self._partial_visible_segments = 0
+        if self._partial_task_id:
+            try:
+                self.root.after_cancel(self._partial_task_id)
+            except Exception:
+                pass
+            self._partial_task_id = None
+
+    def _partial_step(self):
+        # reveal next portion: each portion reveals N hits (и соответствующие сегменты)
+        if not self.partial_load_enabled:
+            self._partial_task_id = None
+            return
+        if not self._partial_cast_cache:
+            self.start_partial_load()
+            return
+        cast = self._partial_cast_cache
+        hits = cast.get('hits', [])
+        segments = cast.get('segments', [])
+
+        # reveal N hits and ensure segments coverage:
+        remaining_to_reveal = self.partial_load_per_interval
+        while remaining_to_reveal > 0 and self._partial_visible_hits < len(hits):
+            self._partial_visible_hits += 1
+            remaining_to_reveal -= 1
+            # after revealing hit i, we must ensure next segment is visible too (segment index typically equals hit index+1)
+            # Simplify: make visible segments = visible_hits + 1 (if exists)
+            self._partial_visible_segments = min(len(segments), self._partial_visible_hits + 1)
+
+        # If no hits exist, still ensure at least one segment shown
+        if len(hits) == 0 and len(segments) > 0:
+            self._partial_visible_segments = 1
+
+        self.render()
+
+        # stop if everything shown
+        if self._partial_visible_hits >= len(hits) and self._partial_visible_segments >= len(segments):
+            self._partial_task_id = None
+            # keep cache (so re-rendering doesn't recompute), but no further scheduling
+            return
+
+        # schedule next step
+        try:
+            ms = int(self.partial_load_interval * 1000)
+            self._partial_task_id = self.root.after(ms, self._partial_step)
+        except Exception:
+            self._partial_task_id = None
+
+    # ---- Color / brush ----
     def pick_color(self):
         c = colorchooser.askcolor(color=self.current_color)
         if c and c[1]:
@@ -933,7 +1114,7 @@ class LaserApp:
         except:
             self.brush_size = 1
 
-    # ----Modes----
+    # ---- Modes ----
     def toggle_frame_mode(self):
         self.is_framing = not self.is_framing
         self.frame_btn.config(text=f"Режим рамки: {'Вкл' if self.is_framing else 'Выкл'}")
@@ -950,7 +1131,7 @@ class LaserApp:
         if self.is_erasing:
             self.is_framing = False; self.frame_btn.config(text='Режим рамки: Выкл')
 
-    # ----Procedural assignment----
+    # ---- Procedural assignment ----
     def procedural_assign_prompt(self):
         if not self.strokes:
             messagebox.showinfo('Нет линий', 'Нет нарисованных линий для распределения меток.')
@@ -972,8 +1153,7 @@ class LaserApp:
         cnt = 0
         for s in self.strokes:
             if not s or 'points' not in s: continue
-            for i in range(1, len(s['points'])):
-                cnt += k
+            for i in range(1, len(s['points'])): cnt += k
         return cnt
 
     def procedural_assign(self, kPerSegment):
@@ -983,231 +1163,208 @@ class LaserApp:
             if not s or 'points' not in s or len(s['points']) < 2: continue
             for i in range(1, len(s['points'])):
                 A = s['points'][i - 1]; B = s['points'][i]
-                segVec = v_sub(B, A)
-                segLen = v_len(segVec)
+                segVec = v_sub(B, A); segLen = v_len(segVec)
                 if segLen == 0: continue
                 segDir = v_norm(segVec)
                 epsilon = min(0.0001, segLen * 0.02)
                 for m in range(1, kPerSegment + 1):
                     t = m / (kPerSegment + 1)
-                    pt = v_add(A, v_scale(segVec, t))
-                    id = str(time.time()) + str(random.random())
-                    a = v_add(pt, v_scale(segDir, -epsilon))
-                    b = v_add(pt, v_scale(segDir, epsilon))
-                    self.tags.append({'id': id, 'number': nextNumber, 'a': a, 'b': b, 'strokeIndex': si})
-                    nextNumber += 1
+                    pt=v_add(A,v_scale(segVec,t))
+            # вычисляем точку на сегменте: A + segVec * t
 
-    # ----Download ricochets (save numbers from intersections)----
-    def download_ricochets(self):
-        # Получаем текущую последовательность через helper
-        seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg)
-        if not seq:
-            if not messagebox.askyesno('Не найдено', 'Не найдено рикошетов по помеченным отрезкам. Скачать пустой файл?'):
-                return
-        # Записываем в файл — одна строка = одно число (одна колонка)
-        content = '\n'.join(seq)
-        fn = filedialog.asksaveasfilename(defaultextension='.txt', filetypes=[('TXT', '*.txt')])
-        if not fn: return
-        with open(fn, 'w', encoding='utf-8') as f:
-            f.write(content)
-        messagebox.showinfo('Сохранено', 'Файл сохранён')
+            # Создаем небольшой отрезок (метку), перпендикулярно сегменту.
+            # Длина "хвостика" пропорциональна длине сегмента, но не больше 0.1
+                segHalfLen = min(0.1, segLen * 0.01)
 
-    # ----Новое: Поиск рикошетов по файлу----
-    def _normalize_num_str(self, v):
-        # Приводим число/строку к каноничному строковому виду: если целое — без .0
+            # вектор, перпендикулярный направлению сегмента
+                perp = v_perp(segDir)
+            # нормируем перпендикуляр, чтобы его длина = 1
+                perp = v_norm(perp)
+
+            # концевые точки маленького перпендикулярного отрезка:
+            # a_pt = pt + perp * segHalfLen
+                a_pt = v_add(pt, v_scale(perp, segHalfLen))
+            # b_pt = pt - perp * segHalfLen
+                b_pt = v_add(pt, v_scale(perp, -segHalfLen))
+
+            # уникальный идентификатор метки (строки времени + случайное число)
+                id = str(time.time()) + str(random.random())
+
+            # добавляем метку в список тегов/меток:
+            # каждый тег — словарь с полями: id, number, a, b, strokeIndex
+                self.tags.append({
+                'id': id,
+                'number': nextNumber,
+                'a': a_pt,
+                'b': b_pt,
+                'strokeIndex': si
+                })
+
+            # увеличиваем счётчик номеров для следующей метки
+                nextNumber += 1
+
+    # по завершении цикла/функции — перерисовать холст/интерфейс
+        self.render()
+
+    # ---- UI helpers ----
+    def goto_cam(self):
         try:
-            f = float(v)
-            if abs(f - int(f)) < 1e-9: return str(int(f))
-            return str(f)
-        except:
-            return str(v).strip()
+            x = float(self.x_entry.get())
+            z = float(self.z_entry.get())
+            self.camX = x
+            self.camZ = z
+            self.render()
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректные координаты X и Z (числа).')
+
+    # ---- Helpers for sequences ----
+    def _normalize_num_str(self, num):
+        # Приводим номер к компактному строковому виду (целое, если возможно)
+        try:
+            if isinstance(num, str):
+                s = num.strip()
+                # попытка привести к числу
+                if re.match(r'^-?\d+(\.\d+)?$', s):
+                    f = float(s)
+                    if abs(f - int(f)) < 1e-9:
+                        return str(int(f))
+                    return str(f)
+                return s
+            elif isinstance(num, (int,)):
+                return str(num)
+            elif isinstance(num, float):
+                if abs(num - int(num)) < 1e-9:
+                    return str(int(num))
+                return str(num)
+            else:
+                return str(num)
+        except Exception:
+            return str(num)
 
     def _get_ricochet_sequence_for_angle(self, angle_deg):
-        origin = {'x': 0, 'z': 0}
+        # Возвращает список строк-номеров, полученных при трассировке лазера под углом angle_deg
+        origin = {'x': 0.0, 'z': 0.0}
         angle = math.radians(angle_deg)
         dir = {'x': math.cos(angle), 'z': math.sin(angle)}
-        maxB = None if self.laser_unlimited else int(self.laser_max_bounces)
-        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {
-            'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
-        numbers = []
-        for hit in cast['hits']:
-            if hit.get('strokeIndex') is None or not self.tags: continue
+        maxB = None if self.laser_unlimited else int(self.laser_max_bounces) - 1
+        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
+        seq = []
+        hits = cast.get('hits', [])
+        for hit in hits:
+            if hit.get('strokeIndex') is None or not self.tags:
+                continue
             for t in self.tags:
-                if t.get('strokeIndex') != hit.get('strokeIndex'): continue
+                if t.get('strokeIndex') != hit.get('strokeIndex'):
+                    continue
                 if self.point_on_segment(hit['point'], t['a'], t['b'], 1e-4):
-                    numbers.append(self._normalize_num_str(t['number']))
+                    seq.append(self._normalize_num_str(t['number']))
                     break
-        return numbers
+        return seq
 
+    # ---- Search / download ricochets (простая реализация) ----
     def search_ricochet_file(self):
-        # Нажатие кнопки: старт/стоп поиска
-        if self._search_running:
-            # отмена
-            self._search_running = False
-            self.search_btn.config(text='Поиск рикошетов')
+        # Открывает файл со списком углов (по одному углу в строке), вычисляет последовательности и предлагает сохранить результат
+        fn = filedialog.askopenfilename(title='Выберите файл с углами', filetypes=[('Text','*.txt;*.csv;*.list'), ('All','*.*')])
+        if not fn:
             return
-        fn = filedialog.askopenfilename(filetypes=[('TXT', '*.txt'), ('All', '*.*')])
-        if not fn: return
         try:
             with open(fn, 'r', encoding='utf-8') as f:
-                content = f.read()
+                lines = [l.strip() for l in f.readlines()]
         except Exception:
-            messagebox.showerror('Ошибка', 'Не могу прочитать файл'); return
-        tokens = re.findall(r'[-+]?\d*\.?\d+', content)
-        if not tokens:
-            messagebox.showerror('Ошибка', 'В файле не найдено чисел'); return
-        target = [self._normalize_num_str(t) for t in tokens]
-        self._search_target = target
-        # Инициализация поиска
-        self._search_running = True
-        self._search_initial_angle = float(self.laser_angle_deg) % 360
-        self._search_steps_done = 0
-        # optional: allow changing step
-        try:
-            step = simpledialog.askfloat('Шаг поиска (градусы)', 'Введите шаг вращения в градусах (меньше=медленнее, более точнее):',
-                                         initialvalue=self._search_step_deg, minvalue=0.01, maxvalue=90.0)
-            if step is not None: self._search_step_deg = float(step)
-        except:
-            pass
-        self.search_btn.config(text='Отменить поиск')
-        # запустить шаги
-        self._search_step()
-
-    def _search_step(self):
-        if not self._search_running: return
-        step = self._search_step_deg
-        steps_done = self._search_steps_done
-        angle = (self._search_initial_angle + steps_done * step) % 360
-        # обновляем визуально угол
-        self.laser_angle_deg = angle
-        try: self.rotate_scale.set(angle)
-        except: pass
-        self.render()
-        seq = self._get_ricochet_sequence_for_angle(angle)
-        # сравнение последовательностей как списков строк
-        if seq == self._search_target:
-            self._search_running = False
-            self.search_btn.config(text='Поиск рикошетов')
-            messagebox.showinfo('Найдено', f'Комбинация найдена при угле {angle:.3f}°')
+            messagebox.showerror('Ошибка', 'Не удалось прочитать файл углов.')
             return
-        # увеличиваем шаг
-        self._search_steps_done += 1
-        # если сделали полный оборот — останов
-        if (self._search_steps_done * step) >= 360 - 1e-9:
-            self._search_running = False
-            self.search_btn.config(text='Поиск рикошетов')
-            messagebox.showinfo('Не найдено', 'Комбинация не найдена за 360° оборот.')
-            return
-        # иначе планируем следующий шаг
-        self.root.after(10, self._search_step)
-
-    # ----Новое: управление окном рикошетов----
-    def toggle_show_ricochets(self):
-        if self.ricochet_window:
-            self._close_ricochet_window()
-        else:
-            self._open_ricochet_window()
-
-    def _open_ricochet_window(self):
-        if self.ricochet_window: return
-        w = tk.Toplevel(self.root)
-        w.title('Рикошеты (в реальном времени)')
-        w.geometry('520x110')
-        w.transient(self.root)
-
-        # Однострочное поле для отображения рикошетов — можно копировать
-        entry = ttk.Entry(w, textvariable=self.ricochet_var, font=('Arial', 12))
-        entry.pack(fill='x', expand=True, padx=8, pady=(8, 4))
-        # Сделаем поле readonly — текст обновляется через StringVar, но пользователь может выделять и копировать
-        entry.state(['readonly'])
-
-        # Полоса с меткой количества и кнопкой "Копировать"
-        bottom = ttk.Frame(w)
-        bottom.pack(fill='x', padx=8, pady=(0, 8))
-
-        ttk.Label(bottom, text='Рикошетов:').pack(side='left', padx=(0, 6))
-        count_lbl = ttk.Label(bottom, textvariable=self.ricochet_count_var)
-        count_lbl.pack(side='left')
-
-        def _copy_to_clipboard():
-            txt = self.ricochet_var.get() or ''
+        angles = []
+        for ln in lines:
+            if not ln:
+                continue
             try:
-                w.clipboard_clear()
-                w.clipboard_append(txt)
+                angles.append(float(ln.split()[0]))
+            except Exception:
+                # игнорируем некорректные строки
+                continue
+        if not angles:
+            messagebox.showinfo('Результат', 'В файле не найдено корректных углов.')
+            return
+        # Выполнение поиска (последовательный)
+        results = []
+        for a in angles:
+            seq = self._get_ricochet_sequence_for_angle(a)
+            results.append({'angle': a, 'sequence': seq})
+        # Сохранение результата
+        save_fn = filedialog.asksaveasfilename(defaultextension='.txt', filetypes=[('Text','*.txt'), ('JSON','*.json')], title='Сохранить результаты')
+        if not save_fn:
+            return
+        try:
+            if save_fn.lower().endswith('.json'):
+                with open(save_fn, 'w', encoding='utf-8') as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+            else:
+                with open(save_fn, 'w', encoding='utf-8') as f:
+                    for r in results:
+                        line = f"{r['angle']}:\t{' '.join(r['sequence'])}\n"
+                        f.write(line)
+            messagebox.showinfo('Готово', f'Результаты сохранены в {save_fn}')
+        except Exception:
+            messagebox.showerror('Ошибка', 'Не удалось сохранить результаты.')
+
+    def download_ricochets(self):
+        # Сохраняет текущую видимую последовательность (из окна или вычисленную для текущего угла)
+        text = ''
+        if self.ricochet_var and self.ricochet_var.get().strip():
+            text = self.ricochet_var.get()
+        else:
+            seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg)
+            text = ' '.join(seq)
+        if not text:
+            messagebox.showinfo('Пусто', 'Нет данных для сохранения.')
+            return
+        save_fn = filedialog.asksaveasfilename(defaultextension='.txt', filetypes=[('Text','*.txt')], title='Сохранить последовательность')
+        if not save_fn:
+            return
+        try:
+            with open(save_fn, 'w', encoding='utf-8') as f:
+                f.write(text)
+            messagebox.showinfo('Готово', f'Сохранено в {save_fn}')
+        except Exception:
+            messagebox.showerror('Ошибка', 'Не удалось сохранить файл.')
+
+    def toggle_show_ricochets(self):
+        # Показывает/скрывает окно рикошетов
+        if self.ricochet_window and tk.Toplevel.winfo_exists(self.ricochet_window):
+            try:
+                self.ricochet_window.destroy()
             except Exception:
                 pass
-
-        ttk.Button(bottom, text='Копировать', command=_copy_to_clipboard).pack(side='right')
-
-        # Бинды удобства: Ctrl+A для выделения всего и при фокусе — выделять автоматически
-        def _select_all(event=None):
-            try:
-                entry.selection_range(0, 'end')
-                return 'break'
-            except Exception:
-                return None
-
-        entry.bind('<Control-a>', _select_all)
-        entry.bind('<Control-A>', _select_all)
-        entry.bind('<FocusIn>', lambda e: w.after(1, _select_all))
-
-        def on_close():
-            self._close_ricochet_window()
-        w.protocol("WM_DELETE_WINDOW", on_close)
-
+            self.ricochet_window = None
+            return
+        # Создаём окно
+        w = tk.Toplevel(self.root)
+        w.title('Рикошеты')
         self.ricochet_window = w
-        self.show_hits_btn.config(text='Скрыть рикошеты')
-
-        # Начальное заполнение
+        frm = ttk.Frame(w, padding=8)
+        frm.pack(fill='both', expand=True)
+        ttk.Label(frm, text='Последовательность:').pack(anchor='w')
+        txt = ttk.Label(frm, textvariable=self.ricochet_var, wraplength=400, justify='left')
+        txt.pack(fill='x', pady=(4,4))
+        btm_fr = ttk.Frame(frm)
+        btm_fr.pack(fill='x', pady=(6,0))
+        ttk.Label(btm_fr, text='Количество:').pack(side='left')
+        ttk.Label(btm_fr, textvariable=self.ricochet_count_var).pack(side='left', padx=(4,10))
+        ttk.Button(btm_fr, text='Сохранить', command=self.download_ricochets).pack(side='right')
+        ttk.Button(btm_fr, text='Закрыть', command=lambda: (w.destroy(), setattr(self, 'ricochet_window', None))).pack(side='right', padx=(4,0))
+        # при закрытии окна корректно обнуляем ссылку
+        def on_close():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+            self.ricochet_window = None
+        w.protocol("WM_DELETE_WINDOW", on_close)
+        # Инициализация текста (render обновляет переменные при перерисовке)
         seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg)
         self.ricochet_var.set(' '.join(seq))
         self.ricochet_count_var.set(str(len(seq)))
-
-        self.render()
-
-    def _close_ricochet_window(self):
-        if not self.ricochet_window: return
-        try:
-            self.ricochet_window.destroy()
-        except:
-            pass
-        self.ricochet_window = None
-        self.ricochet_var.set('')
-        self.ricochet_count_var.set('0')
-        self.show_hits_btn.config(text='Показать рикошеты')
-
-    # ----Helper small wrappers----
-    def goto_cam(self):
-        try:
-            self.camX = float(self.x_entry.get()); self.camZ = float(self.z_entry.get()); self.render()
-        except: pass
-# ---- Main ----
 if __name__ == '__main__':
-    # Создаём корень tkinter (подстраховка на случай, если в файле не использовался псевдоним tk)
-    try:
-        root = tk.Tk()
-    except NameError:
-        from tkinter import Tk as _Tk
-        root = _Tk()
-
-    # Инициализируем приложение
-    try:
-        app = LaserApp(root)
-    except Exception as e:
-        print('Ошибка при создании приложения:', e)
-        raise
-
-    # Гладкое закрытие
-    if hasattr(app, 'on_close') and callable(app.on_close):
-        root.protocol("WM_DELETE_WINDOW", app.on_close)
-    else:
-        root.protocol("WM_DELETE_WINDOW", root.destroy)
-
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        try:
-            root.destroy()
-        except Exception:
-            pass
-        sys.exit(0)
+    root = tk.Tk()
+    app = LaserApp(root)
+    root.mainloop()
