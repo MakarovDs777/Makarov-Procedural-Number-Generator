@@ -440,7 +440,7 @@ class LaserApp:
 
         for z in range(math.floor(lt['z']), math.ceil(rb['z']) + 1):
             s = self.world_to_screen(0, z)
-            ctx.create_line(0, s['y'], w, s['y'], fill='#000000', width=1)
+            ctx.create_line(0, s['y'], w, s['y'], fill="#000000", width=1)
 
     def draw_strokes(self, ctx):
         for s in self.strokes:
@@ -497,7 +497,6 @@ class LaserApp:
 
         # Optional grid
         # self.draw_grid(self.canvas)
-
         self.draw_image_if_any(self.canvas)
         self.draw_strokes(self.canvas)
 
@@ -506,19 +505,55 @@ class LaserApp:
             origin = {'x': 0.0, 'z': 0.0}
             angle = math.radians(self.laser_angle_deg)
             dir_vec = {'x': math.cos(angle), 'z': math.sin(angle)}
-
             maxB = None if self.laser_unlimited else int(self.laser_max_bounces) - 1
-            if self.laser_reflect:
-                cast = self.cast_laser(origin, dir_vec, float(self.laser_length), maxB)
-            else:
-                cast = {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir_vec, self.laser_length))}], 'hits': []}
 
-            for seg in cast['segments']:
+        # При включенной частичной прогрузке используем кэш трассировки и
+        # отрисовываем только видимые сегменты/попадания; если кэша нет — создаём её.
+            if self.partial_load_enabled:
+                if not self._partial_cast_cache:
+                    if self.laser_reflect:
+                        self._partial_cast_cache = self.cast_laser(origin, dir_vec, float(self.laser_length), maxB)
+                    else:
+                        self._partial_cast_cache = {
+                            'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir_vec, self.laser_length))}],
+                            'hits': []
+                        }
+                    # Инициализация видимых счётчиков
+                    self._partial_visible_segments = 1 if self._partial_cast_cache.get('segments') else 0
+                    self._partial_visible_hits = 0
+
+                cast = self._partial_cast_cache
+                segments = cast.get('segments', [])
+                hits = cast.get('hits', [])
+
+                draw_segments = min(self._partial_visible_segments, len(segments))
+                draw_hits = min(self._partial_visible_hits, len(hits))
+            else:
+                # Обычная (полная) отрисовка — пересчитываем трассу и показываем всё
+                if self.laser_reflect:
+                    cast = self.cast_laser(origin, dir_vec, float(self.laser_length), maxB)
+                else:
+                    cast = {
+                        'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir_vec, self.laser_length))}],
+                        'hits': []
+                    }
+                segments = cast.get('segments', [])
+                hits = cast.get('hits', [])
+
+                draw_segments = len(segments)
+                draw_hits = len(hits)
+
+            # Отрисовать сегменты (только нужное количество)
+            for i in range(min(draw_segments, len(segments))):
+                seg = segments[i]
                 A = self.world_to_screen(seg['a']['x'], seg['a']['z'])
                 B = self.world_to_screen(seg['b']['x'], seg['b']['z'])
+                # сохраняем прежний стиль: прерывистая красная линия
                 self.canvas.create_line(A['x'], A['y'], B['x'], B['y'], fill='#C81E1E', width=2, dash=(6, 4))
 
-            for h in cast['hits']:
+            # Отрисовать попадания (только нужное количество)
+            for i in range(min(draw_hits, len(hits))):
+                h = hits[i]
                 p = self.world_to_screen(h['point']['x'], h['point']['z'])
                 color = '#50A028' if h.get('source') == 'image' else '#FFC828'
                 self.canvas.create_oval(p['x'] - 4, p['y'] - 4, p['x'] + 4, p['y'] + 4, fill=color, outline='')
@@ -527,20 +562,26 @@ class LaserApp:
             self.canvas.create_line(originS['x'] - 8, originS['y'], originS['x'] + 8, originS['y'], fill='#000000', width=1)
             self.canvas.create_line(originS['x'], originS['y'] - 8, originS['x'], originS['y'] + 8, fill='#000000', width=1)
 
-        # послед последовательность рикошетов для UI
-        seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg)
-        current_seq_str = ' '.join(seq)
+            # Обновление текстовой информации (сколько всего и сколько видно при partial)
+            total_segments = len(segments)
+            total_hits = len(hits)
+            txt = f"segments: {total_segments}, hits: {total_hits}"
+            if self.partial_load_enabled:
+                txt += f"   (visible segments: {draw_segments}, visible hits: {draw_hits})"
+            self.canvas.create_text(10, self.canvas.winfo_height() - 10, anchor='sw', text=txt, fill='black')
 
+        # Если рамка есть — отрисовать её и метки
         if self.frame and self.frame.get('active'):
             self.draw_frame(self.canvas)
-
         self.draw_tags(self.canvas)
 
-        # обновление окна рикошетов если открыто
+        # Обновление окна рикошетов, если открыто
         if self.ricochet_window:
             try:
+                seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg)
+                current_seq_str = ' '.join(seq)
                 self.ricochet_var.set(current_seq_str)
-                self.ricochet_count_var.set(str(len(current_seq_str.split())) if current_seq_str.strip() else '0')
+                self.ricochet_count_var.set(str(len(seq)) if current_seq_str.strip() else '0')
             except Exception:
                 pass
 
@@ -983,7 +1024,7 @@ class LaserApp:
         self.tags = []
         for s in data.get('strokes', []):
             pts = [{'x': float(p[0]), 'z': float(p[1])} for p in s.get('points', [])]
-            self.strokes.append({'color': s.get('color', '#000000'), 'size': float(s.get('size', 1)), 'points': pts})
+            self.strokes.append({'color': s.get('color', "#000000"), 'size': float(s.get('size', 1)), 'points': pts})
         for t in data.get('tags', []):
             if not isinstance(t, list) or len(t) < 5:
                 continue
