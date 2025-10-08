@@ -3,7 +3,6 @@ from tkinter import ttk, colorchooser, filedialog, simpledialog, messagebox
 from PIL import Image, ImageTk, ImageOps
 import math, random, json, time, io, re, sys
 
-
 # ---- Вспомогательные векторы ----
 def v_add(a, b):
     return {'x': a['x'] + b['x'], 'z': a['z'] + b['z']}
@@ -91,6 +90,15 @@ class LaserApp:
         self.ricochet_window = None
         self.ricochet_var = tk.StringVar(value='')
         self.ricochet_count_var = tk.StringVar(value='0')
+        # ----Новое: частичная прогрузка (инициализация)----
+        self.partial_load_enabled = False                      # флаг включения частичной прогрузки
+        self.partial_load_per_interval = 1                     # сколько рикошетов показывать за 1 шаг
+        self.partial_load_interval = 0.1                       # интервал в секундах между шагами (по умолчанию 0.1)
+        # кэш расчёта трассировки и состояние прогрузки
+        self._partial_cast_cache = None
+        self._partial_visible_hits = 0
+        self._partial_visible_segments = 0
+        self._partial_task_id = None
 
         # UI
         self._build_ui()
@@ -233,7 +241,26 @@ class LaserApp:
         self.status_var = tk.StringVar(value='X:0 Z:0')
         status = ttk.Label(self.root, textvariable=self.status_var)
         status.pack(side='bottom', fill='x')
+        # ----Новое(частичная прогрузка)----
+        self.partial_btn = ttk.Button(laser_fr, text='Прогружать частично: Выкл', command=self.toggle_partial_load)
+        self.partial_btn.grid(row=4, column=0, pady=(6,2), columnspan=1)
 
+        ttk.Label(laser_fr, text='шт/шаг:').grid(row=4, column=1, sticky='e')
+        self.partial_count_entry = ttk.Entry(laser_fr, width=6)
+        self.partial_count_entry.grid(row=4, column=2, sticky='w')
+        self.partial_count_entry.insert(0, str(self.partial_load_per_interval))
+
+        ttk.Label(laser_fr, text='Интервал (с):').grid(row=5, column=0, sticky='e')
+        self.partial_interval_entry = ttk.Entry(laser_fr, width=6)
+        self.partial_interval_entry.grid(row=5, column=1, sticky='w')
+        self.partial_interval_entry.insert(0, str(self.partial_load_interval))
+
+        ttk.Button(laser_fr, text='Применить', command=self.apply_partial_params).grid(row=5, column=2, padx=(4,0))
+
+        # бинды: Enter применяет параметры
+        self.partial_count_entry.bind('<Return>', lambda ev: self.apply_partial_params())
+        self.partial_interval_entry.bind('<Return>', lambda ev: self.apply_partial_params())
+    
     # ---- Events / transforms ----
     def _bind_canvas_events(self):
         self.canvas.bind('<ButtonPress-1>', self.on_pointer_down)
@@ -1388,6 +1415,120 @@ class LaserApp:
             self.render()
         except:
             pass
+
+    def apply_partial_params(self):
+        # читаем значения из полей и применяем (без включения/выключения)
+        try:
+            cnt = int(float(self.partial_count_entry.get()))
+            if cnt < 1:
+                raise ValueError()
+            self.partial_load_per_interval = cnt
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректное количество рикошетов за шаг (целое >=1).')
+            return
+
+        try:
+            iv = float(self.partial_interval_entry.get())
+            if iv <= 0:
+                raise ValueError()
+            self.partial_load_interval = iv
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректный интервал в секундах (>0).')
+            return
+
+    # если сейчас прогрузка активна — перезапускаем с новыми параметрами
+        if self.partial_load_enabled:
+            self.start_partial_load()
+
+    def toggle_partial_load(self):
+        self.partial_load_enabled = not self.partial_load_enabled
+        self.partial_btn.config(text=f"Прогружать частично: {'Вкл' if self.partial_load_enabled else 'Выкл'}")
+        if self.partial_load_enabled:
+        # стартуем анимацию/пошаговую проливку
+            self.start_partial_load()
+        else:
+        # останавливаем и очищаем кэш
+            self.stop_partial_load()
+            self.render()
+
+    def start_partial_load(self):
+        # отменяем предыдущую задачу, если есть
+        if self._partial_task_id:
+            try:
+                self.root.after_cancel(self._partial_task_id)
+            except Exception:
+                pass
+            self._partial_task_id = None
+
+        # пересчитываем трассу для текущих параметров
+        origin = {'x': 0.0, 'z': 0.0}
+        angle = math.radians(self.laser_angle_deg)
+        dir = {'x': math.cos(angle), 'z': math.sin(angle)}
+        maxB = None if self.laser_unlimited else int(self.laser_max_bounces) - 1
+
+        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
+        self._partial_cast_cache = cast
+
+        # сбрасываем видимые счётчики: показываем первый сегмент по умолчанию
+        self._partial_visible_segments = 1 if cast.get('segments') else 0
+        self._partial_visible_hits = 0
+
+        # запускаем шаговый таймер
+        self._partial_step()
+
+    def stop_partial_load(self):
+        self._partial_cast_cache = None
+        self._partial_visible_hits = 0
+        self._partial_visible_segments = 0
+        if self._partial_task_id:
+            try:
+                self.root.after_cancel(self._partial_task_id)
+            except Exception:
+                pass
+        self._partial_task_id = None
+
+    def _partial_step(self):
+        # раскрываем следующую порцию (partial_load_per_interval) рикошетов и соответствующие сегменты
+        if not self.partial_load_enabled:
+            self._partial_task_id = None
+            return
+
+        if not self._partial_cast_cache:
+            # если кэша нет — пересчитать и перезапустить
+            self.start_partial_load()
+            return
+
+        cast = self._partial_cast_cache
+        hits = cast.get('hits', [])
+        segments = cast.get('segments', [])
+
+        # раскрываем N hit-ов
+        remaining_to_reveal = self.partial_load_per_interval
+        while remaining_to_reveal > 0 and self._partial_visible_hits < len(hits):
+            self._partial_visible_hits += 1
+            remaining_to_reveal -= 1
+
+        # после раскрытия определяем, сколько сегментов показывать:
+        # минимально — visible_hits + 1 (чтобы видно было следующий сегмент после попадания)
+        self._partial_visible_segments = min(len(segments), self._partial_visible_hits + 1) if len(segments) > 0 else 0
+
+        # если нет хиттов — всё равно показываем первый сегмент, если он есть
+        if len(hits) == 0 and len(segments) > 0:
+            self._partial_visible_segments = 1
+
+        self.render()
+
+        # если всё показано — не планируем дальше
+        if self._partial_visible_hits >= len(hits) and self._partial_visible_segments >= len(segments):
+            self._partial_task_id = None
+            return
+
+        # иначе — планируем следующий шаг
+        try:
+            ms = int(self.partial_load_interval * 1000)
+            self._partial_task_id = self.root.after(ms, self._partial_step)
+        except Exception:
+            self._partial_task_id = None
 
 
 # ---- Main ----
