@@ -172,6 +172,7 @@ class LaserApp:
         self.laser_reflect_var = tk.BooleanVar(value=self.laser_reflect)
         ttk.Checkbutton(laser_fr, text='Отражения', variable=self.laser_reflect_var, command=self.toggle_laser_reflect).grid(row=2, column=0, columnspan=3)
         ttk.Button(laser_fr, text='Без лимита', command=self.toggle_laser_unlimited).grid(row=3, column=0, pady=4)
+        ttk.Button(laser_fr, text='Расширять до рикошетов', command=self.start_expand_until_bounces).grid(row=3, column=3, padx=(6,0), pady=4)
 
         self.laser_bounces_entry = ttk.Entry(laser_fr, width=8)
         self.laser_bounces_entry.grid(row=3, column=1)
@@ -257,10 +258,79 @@ class LaserApp:
 
         ttk.Button(laser_fr, text='Применить', command=self.apply_partial_params).grid(row=5, column=2, padx=(4,0))
 
+        # состояние управления
+        self.expand_until_bounces = False
+        self.override_bounces = None  # если None — использовать обычное поле self.laser_bounces
+
         # бинды: Enter применяет параметры
         self.partial_count_entry.bind('<Return>', lambda ev: self.apply_partial_params())
         self.partial_interval_entry.bind('<Return>', lambda ev: self.apply_partial_params())
-    
+
+    def start_expand_until_bounces(self):
+        val = int(float(self.laser_bounces_entry.get()))
+        self.override_bounces = val
+        self.expand_until_bounces = True
+        # выключаем без лимита, чтобы не было конфликта
+        if self.laser_unlimited:
+            self.laser_unlimited = False
+            self.laser_len_entry.config(state='normal')
+        self.render()
+    def toggle_laser_unlimited(self):
+        self.laser_unlimited = not self.laser_unlimited
+        if self.laser_unlimited and self.expand_until_bounces:
+            self.expand_until_bounces = False
+        # обновление UI...
+        self.render()
+    def trace_laser(self, origin, direction):
+        """Пример: трассировка луча с учётом нового режима."""
+        bounces_left = self.override_bounces if (self.expand_until_bounces and self.override_bounces is not None) else self.laser_bounces
+        remaining_length = self.laser_length
+
+        # Если режим расширения включён — игнорируем remaining_length и считаем, что длина бесконечна
+        ignore_length = bool(self.expand_until_bounces)
+
+        path = []
+        pos = origin
+        dir = direction
+
+        while bounces_left > 0:
+            hit = self.find_nearest_intersection(pos, dir)
+            if not hit:
+                if ignore_length:
+                    # если нет пересечения и мы игнорим длину — заканчиваем (луч улетел в бесконечность)
+                    break
+                else:
+                    # старое поведение: двигаемся на remaining_length и завершаем
+                    path.append((pos, pos + dir * remaining_length))
+                    break
+
+            distance = (hit.point - pos).length()
+            if not ignore_length and distance > remaining_length:
+            # не хватает длины — обрезаем по длине и завершаем
+                path.append((pos, pos + dir * remaining_length))
+                break
+
+            ignore_length = self.laser_unlimited or self.expand_until_bounces
+            if self.expand_until_bounces and self.override_bounces is not None:
+                bounces_left = self.override_bounces
+            else:
+                bounces_left = self.laser_bounces
+            # попали в объект — добавляем сегмент
+            path.append((pos, hit.point))
+            bounces_left -= 1
+            if bounces_left <= 0:
+                break
+
+            # рассчитываем отражение/преломление
+            pos = hit.point
+            dir = self.compute_reflection(dir, hit.normal)
+            # если не игнорим длину — уменьшаем remaining_length
+            if not ignore_length:
+                remaining_length -= distance
+
+        # по завершении можно автоматически выключать режим (опционально)
+        # self.expand_until_bounces = False
+        return path
     # ---- Events / transforms ----
     def _bind_canvas_events(self):
         self.canvas.bind('<ButtonPress-1>', self.on_pointer_down)
