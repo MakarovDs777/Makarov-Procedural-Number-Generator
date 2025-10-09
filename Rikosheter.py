@@ -204,7 +204,7 @@ class LaserApp:
         ttk.Button(modes_fr, text='Очистить метки', command=self.clear_tags).grid(row=2, column=0)
         ttk.Button(modes_fr, text='Экспорт TXT', command=self.export_txt).grid(row=2, column=1)
         ttk.Button(modes_fr, text='Импорт TXT', command=self.import_txt).grid(row=2, column=2)
-        ttk.Button(modes_fr, text='Процедурно расставить', command=self.procedural_assign_prompt).grid(row=3, column=0, columnspan=3, pady=4)
+        ttk.Button(modes_fr, text='Процедурно расставить числа', command=self.procedural_assign_prompt).grid(row=3, column=0, columnspan=3, pady=4)
 
         # Поиск рикошетов
         self.search_btn = ttk.Button(modes_fr, text='Поиск рикошетов', command=self.search_ricochet_file)
