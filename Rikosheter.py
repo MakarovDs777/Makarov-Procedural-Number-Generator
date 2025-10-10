@@ -489,86 +489,83 @@ class LaserApp:
             self.canvas.create_image(a['x'], a['y'], anchor='nw', image=img)
         except Exception:
             pass
-
-    # ---- Rendering ----
     def render(self):
+    # ---- Rendering ----def render(self):
         self.canvas.delete('all')
-        self.canvas.create_rectangle(0, 0, self.canvas.winfo_width(), self.canvas.winfo_height(), fill='#ffffff', outline='')
-
-        # Optional grid
-        # self.draw_grid(self.canvas)
+        self.canvas.create_rectangle(0,0,self.canvas.winfo_width(),self.canvas.winfo_height(),fill='#ffffff',outline='')
+    # Optional grid
+    # self.draw_grid(self.canvas)
         self.draw_image_if_any(self.canvas)
         self.draw_strokes(self.canvas)
 
-        # Laser cast & draw
-        if self.laser_visible:
-            origin = {'x': 0.0, 'z': 0.0}
-            angle = math.radians(self.laser_angle_deg)
-            dir_vec = {'x': math.cos(angle), 'z': math.sin(angle)}
-            maxB = None if self.laser_unlimited else int(self.laser_max_bounces) - 1
+    # Laser cast & draw
+        origin = {'x':0.0,'z':0.0}
+        angle = math.radians(self.laser_angle_deg)
+        dir_vec = {'x':math.cos(angle),'z':math.sin(angle)}
 
-        # При включенной частичной прогрузке используем кэш трассировки и
-        # отрисовываем только видимые сегменты/попадания; если кэша нет — создаём её.
-            if self.partial_load_enabled:
-                if not self._partial_cast_cache:
-                    if self.laser_reflect:
-                        self._partial_cast_cache = self.cast_laser(origin, dir_vec, float(self.laser_length), maxB)
-                    else:
-                        self._partial_cast_cache = {
-                            'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir_vec, self.laser_length))}],
-                            'hits': []
-                        }
-                    # Инициализация видимых счётчиков
-                    self._partial_visible_segments = 1 if self._partial_cast_cache.get('segments') else 0
-                    self._partial_visible_hits = 0
+    # --- ИЗМЕНЕНИЕ: для режима "Без лимита" используем бесконечную длину и
+    # количество рикошетов из поля ввода
+        if self.laser_unlimited:
+            maxB = int(self.laser_max_bounces) - 1
+            maxLen = float('inf')
+        else:
+            maxB = int(self.laser_max_bounces) - 1
+            maxLen = float(self.laser_length)
+    # ---------------------------------------------------------------
 
-                cast = self._partial_cast_cache
-                segments = cast.get('segments', [])
-                hits = cast.get('hits', [])
-
-                draw_segments = min(self._partial_visible_segments, len(segments))
-                draw_hits = min(self._partial_visible_hits, len(hits))
-            else:
-                # Обычная (полная) отрисовка — пересчитываем трассу и показываем всё
+    # Привключенной частичной прогрузке используем кэш трассировки и
+    # отрисовываем только видимые сегменты/попадания; если кэша нет — создаём её.
+        if self.partial_load_enabled:
+            if not self._partial_cast_cache:
                 if self.laser_reflect:
-                    cast = self.cast_laser(origin, dir_vec, float(self.laser_length), maxB)
+                    self._partial_cast_cache = self.cast_laser(origin, dir_vec, maxLen, maxB)
                 else:
-                    cast = {
-                        'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir_vec, self.laser_length))}],
-                        'hits': []
-                    }
-                segments = cast.get('segments', [])
-                hits = cast.get('hits', [])
+                    self._partial_cast_cache = {'segments':[{'a':origin,'b':v_add(origin,v_scale(dir_vec,self.laser_length))}],'hits':[]}
+        # Инициализация видимых счетчиков
+            self._partial_visible_segments = 1 if self._partial_cast_cache.get('segments') else 0
+            self._partial_visible_hits = 0
+            cast = self._partial_cast_cache
+            segments = cast.get('segments', [])
+            hits = cast.get('hits', [])
+            draw_segments = min(self._partial_visible_segments, len(segments))
+            draw_hits = min(self._partial_visible_hits, len(hits))
+        else:
+        # Обычная (полная) отрисовка — пересчитываем трассу и показываем всё
+            if self.laser_reflect:
+                cast = self.cast_laser(origin, dir_vec, maxLen, maxB)
+            else:
+                cast = {'segments':[{'a':origin,'b':v_add(origin,v_scale(dir_vec,self.laser_length))}],'hits':[]}
+            segments = cast.get('segments', [])
+            hits = cast.get('hits', [])
+            draw_segments = len(segments)
+            draw_hits = len(hits)
 
-                draw_segments = len(segments)
-                draw_hits = len(hits)
+    # Отрисовать сегменты
+        for i in range(min(draw_segments, len(segments))):
+            seg = segments[i]
+            A = self.world_to_screen(seg['a']['x'], seg['a']['z'])
+            B = self.world_to_screen(seg['b']['x'], seg['b']['z'])
+        # сохраняем прежний стиль: прерывистая красная линия
+            self.canvas.create_line(A['x'], A['y'], B['x'], B['y'], fill='#C81E1E', width=2, dash=(6,4))
 
-            # Отрисовать сегменты (только нужное количество)
-            for i in range(min(draw_segments, len(segments))):
-                seg = segments[i]
-                A = self.world_to_screen(seg['a']['x'], seg['a']['z'])
-                B = self.world_to_screen(seg['b']['x'], seg['b']['z'])
-                # сохраняем прежний стиль: прерывистая красная линия
-                self.canvas.create_line(A['x'], A['y'], B['x'], B['y'], fill='#C81E1E', width=2, dash=(6, 4))
+        # Отрисовать попадания
+        for i in range(min(draw_hits, len(hits))):
+            h = hits[i]
+            p = self.world_to_screen(h['point']['x'], h['point']['z'])
+            color = '#50A028' if h.get('source') == 'image' else '#FFC828'
+            self.canvas.create_oval(p['x']-4, p['y']-4, p['x']+4, p['y']+4, fill=color, outline='')
 
-            # Отрисовать попадания (только нужное количество)
-            for i in range(min(draw_hits, len(hits))):
-                h = hits[i]
-                p = self.world_to_screen(h['point']['x'], h['point']['z'])
-                color = '#50A028' if h.get('source') == 'image' else '#FFC828'
-                self.canvas.create_oval(p['x'] - 4, p['y'] - 4, p['x'] + 4, p['y'] + 4, fill=color, outline='')
+        originS = self.world_to_screen(0,0)
+        self.canvas.create_line(originS['x']-8, originS['y'], originS['x']+8, originS['y'], fill='#000000', width=1)
+        self.canvas.create_line(originS['x'], originS['y']-8, originS['x'], originS['y']+8, fill='#000000', width=1)
 
-            originS = self.world_to_screen(0, 0)
-            self.canvas.create_line(originS['x'] - 8, originS['y'], originS['x'] + 8, originS['y'], fill='#000000', width=1)
-            self.canvas.create_line(originS['x'], originS['y'] - 8, originS['x'], originS['y'] + 8, fill='#000000', width=1)
-
-            # Обновление текстовой информации (сколько всего и сколько видно при partial)
-            total_segments = len(segments)
-            total_hits = len(hits)
-            txt = f"segments: {total_segments}, hits: {total_hits}"
-            if self.partial_load_enabled:
-                txt += f"   (visible segments: {draw_segments}, visible hits: {draw_hits})"
-            self.canvas.create_text(10, self.canvas.winfo_height() - 10, anchor='sw', text=txt, fill='black')
+    # Обновление текстовой информации (сколько всего и сколько видно при partial)
+        total_segments = len(segments)
+        total_hits = len(hits)
+        txt = f"segments: {total_segments}, hits: {total_hits}"
+        if self.partial_load_enabled:
+            txt += f"   (visible segments: {draw_segments}, visible hits: {draw_hits})"
+        self.canvas.create_text(10, self.canvas.winfo_height()-10, anchor='sw', text=txt, fill='black')
 
         # Если рамка есть — отрисовать её и метки
         if self.frame and self.frame.get('active'):
@@ -584,6 +581,7 @@ class LaserApp:
                 self.ricochet_count_var.set(str(len(seq)) if current_seq_str.strip() else '0')
             except Exception:
                 pass
+
 
     # ---- Geometry intersections ----
     def intersect_ray_segment(self, P, r, Q, Rseg):
@@ -1292,11 +1290,26 @@ class LaserApp:
             return str(v).strip()
 
     def _get_ricochet_sequence_for_angle(self, angle_deg):
-        origin = {'x': 0, 'z': 0}
+        origin = {'x':0,'z':0}
         angle = math.radians(angle_deg)
-        dir_vec = {'x': math.cos(angle), 'z': math.sin(angle)}
-        maxB = None if self.laser_unlimited else int(self.laser_max_bounces)
-        cast = self.cast_laser(origin, dir_vec, float(self.laser_length), maxB) if self.laser_reflect else {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir_vec, self.laser_length))}], 'hits': []}
+        dir_vec = {'x':math.cos(angle),'z':math.sin(angle)}
+
+    # --- ИЗМЕНЕНИЕ: при "Без лимита" игнорируем длину и ставим maxLen=inf,
+    # а количество рикошетов берём из поля ввода ---
+        if self.laser_unlimited:
+            maxB = int(self.laser_max_bounces)
+            maxLen = float('inf')
+        else:
+        # здесь сохраним прежнее поведение (количество берётся из поля)
+            maxB = int(self.laser_max_bounces)
+            maxLen = float(self.laser_length)
+    # ------------------------------------------------------------------
+
+        if self.laser_reflect:
+            cast = self.cast_laser(origin, dir_vec, maxLen, maxB)
+        else:
+            cast = {'segments':[{'a':origin,'b':v_add(origin,v_scale(dir_vec,self.laser_length))}],'hits':[]}
+
         numbers = []
         for hit in cast['hits']:
             if hit.get('strokeIndex') is None or not self.tags:
@@ -1493,29 +1506,41 @@ class LaserApp:
             self.render()
 
     def start_partial_load(self):
-        # отменяем предыдущую задачу, если есть
+    # отменяем предыдущую задачу, если есть
         if self._partial_task_id:
             try:
                 self.root.after_cancel(self._partial_task_id)
             except Exception:
                 pass
-            self._partial_task_id = None
+        self._partial_task_id = None
 
-        # пересчитываем трассу для текущих параметров
-        origin = {'x': 0.0, 'z': 0.0}
+    # пересчитываем трассу для текущих параметров
+        origin = {'x':0.0,'z':0.0}
         angle = math.radians(self.laser_angle_deg)
-        dir = {'x': math.cos(angle), 'z': math.sin(angle)}
-        maxB = None if self.laser_unlimited else int(self.laser_max_bounces) - 1
+        dir = {'x':math.cos(angle),'z':math.sin(angle)}
 
-        cast = self.cast_laser(origin, dir, float(self.laser_length), maxB) if self.laser_reflect else {'segments': [{'a': origin, 'b': v_add(origin, v_scale(dir, self.laser_length))}], 'hits': []}
+    # --- ИЗМЕНЕНИЕ: при "Без лимита" используем бесконечную длину и
+    # количество рикошетов из поля
+        if self.laser_unlimited:
+            maxB = int(self.laser_max_bounces) 
+            maxLen = float('inf')
+        else:
+            maxB = int(self.laser_max_bounces) - 1
+            maxLen = float(self.laser_length)
+    # ---------------------------------------------------------------
+
+        if self.laser_reflect:
+            cast = self.cast_laser(origin, dir, maxLen, maxB)
+        else:
+            cast = {'segments':[{'a':origin,'b':v_add(origin,v_scale(dir,self.laser_length))}],'hits':[]}
+
         self._partial_cast_cache = cast
-
-        # сбрасываем видимые счётчики: показываем первый сегмент по умолчанию
+    # сбрасываем видимые счётчики: показываем первый сегмент по умолчанию
         self._partial_visible_segments = 1 if cast.get('segments') else 0
         self._partial_visible_hits = 0
-
-        # запускаем шаговый таймер
+    # запускаем шаговый таймер
         self._partial_step()
+
 
     def stop_partial_load(self):
         self._partial_cast_cache = None
