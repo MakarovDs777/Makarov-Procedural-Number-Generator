@@ -29,7 +29,6 @@ def v_perp(a):
 def cross2(a, b):
     return a['x'] * b['z'] - a['z'] * b['x']
 
-
 # ---- Приложение ----
 class LaserApp:
     def __init__(self, root):
@@ -213,6 +212,9 @@ class LaserApp:
         # Скачать рикошеты
         self.download_btn = ttk.Button(modes_fr, text='Скачать рикошеты', command=self.download_ricochets)
         self.download_btn.grid(row=4, column=2, pady=4, padx=(6, 0))
+        
+        self.ric_img_btn = ttk.Button(modes_fr, text='Картинка рикошетов', command=self.open_ricochet_image_window)
+        self.ric_img_btn.grid(row=5, column=0, columnspan=3, pady=4)
 
         # Показать рикошеты (окно)
         self.show_hits_btn = ttk.Button(modes_fr, text='Показать рикошеты', command=self.toggle_show_ricochets)
@@ -260,7 +262,102 @@ class LaserApp:
         # бинды: Enter применяет параметры
         self.partial_count_entry.bind('<Return>', lambda ev: self.apply_partial_params())
         self.partial_interval_entry.bind('<Return>', lambda ev: self.apply_partial_params())
-    
+
+    def generate_ricochet_image(self, size=300):
+        """
+    Сгенерировать PIL.Image размера (size x size) на основе последовательности рикошетов.
+    Последовательность берётся из _get_ricochet_sequence_for_angle(self.laser_angle_deg).
+    Если последовательность пустая — используется резервная информация (кол-во штрихов/меток),
+    чтобы картинка всегда была.
+        """
+        seq = self._get_ricochet_sequence_for_angle(self.laser_angle_deg) or []
+        # Преобразуем токены в байты (0..255)
+        mapped = []
+        for s in seq:
+            try:
+                v = int(float(s))
+            except Exception:
+                # fallback: сумма кодов символов
+                v = sum(ord(ch) for ch in str(s))
+            mapped.append(v & 0xFF)
+
+        # fallback, если совсем пусто — используем простые признаки сцены
+        if not mapped:
+            base = (len(self.strokes) + len(self.tags)) & 0xFF
+            mapped = [base or 1]
+
+        total_pixels = size * size
+        total_bytes = total_pixels * 3
+        buf = bytearray(total_bytes)
+        mlen = len(mapped)
+
+        # Заполняем буфер повторяющимися, но смешанными байтами для текстуры
+        for i in range(total_bytes):
+            b = mapped[i % mlen]
+            # Немного перемешиваем по индексу, чтобы получить интересный паттерн
+            b = (b ^ ((i * 37) & 0xFF) ^ ((i // max(1, mlen)) & 0xFF)) & 0xFF
+            buf[i] = b
+
+        # Создаём изображение из байтов (RGB)
+        img = Image.frombytes('RGB', (size, size), bytes(buf))
+        return img
+
+    def open_ricochet_image_window(self):
+        """
+    Открывает окно с картинкой 300x300, сгенерированной по рикошетам.
+    Даёт кнопку сохранения в PNG.
+        """
+        size = 300
+        img = self.generate_ricochet_image(size=size)
+
+        w = tk.Toplevel(self.root)
+        w.title('Картинка рикошетов')
+        # Подгоняем размер окна (немного места под кнопки)
+        w.geometry(f'{size}x{size + 48}')
+        w.transient(self.root)
+
+        # Отображение изображения
+        img_tk = ImageTk.PhotoImage(img)
+        lbl = ttk.Label(w, image=img_tk)
+        lbl.image = img_tk  # сохранить ссылку
+        lbl.pack(padx=4, pady=4)
+
+        # Кнопки: Сохранить и Закрыть
+        btn_fr = ttk.Frame(w)
+        btn_fr.pack(fill='x', padx=6, pady=(0,6))
+
+        def _save():
+            fn = filedialog.asksaveasfilename(defaultextension='.png', filetypes=[('PNG', '*.png')])
+            if not fn:
+                return
+            try:
+                img.save(fn, format='PNG')
+                messagebox.showinfo('Сохранено', 'Изображение сохранено')
+            except Exception as e:
+                messagebox.showerror('Ошибка', f'Не удалось сохранить: {e}')
+
+        def _close():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        ttk.Button(btn_fr, text='Сохранить', command=_save).pack(side='right', padx=(6,0))
+        ttk.Button(btn_fr, text='Закрыть', command=_close).pack(side='right')
+
+        # При закрытии освободим ссылки
+        def on_close():
+            try:
+                lbl.image = None
+            except Exception:
+                pass
+            _close()
+
+        w.protocol("WM_DELETE_WINDOW", on_close)
+        # Показываем окно и возвращаем управление
+        w.focus_force()
+    # <<<
+
     # ---- Events / transforms ----
     def _bind_canvas_events(self):
         self.canvas.bind('<ButtonPress-1>', self.on_pointer_down)
@@ -1595,7 +1692,6 @@ class LaserApp:
             self._partial_task_id = self.root.after(ms, self._partial_step)
         except Exception:
             self._partial_task_id = None
-
 
 # ---- Main ----
 if __name__ == '__main__':
