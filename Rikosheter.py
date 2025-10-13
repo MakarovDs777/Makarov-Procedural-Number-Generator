@@ -168,6 +168,13 @@ class LaserApp:
         self.laser_angle_scale.set(self.laser_angle_deg)
         self.laser_angle_scale.grid(row=1, column=1, columnspan=2, sticky='we')
 
+        ttk.Label(laser_fr, text='Угол (°)').grid(row=1, column=3)
+        self.laser_angle_entry = ttk.Entry(laser_fr, width=8)
+        self.laser_angle_entry.grid(row=1, column=4)
+        self.laser_angle_entry.insert(0, str(self.laser_angle_deg))
+        # Enter в поле применяет угол
+        self.laser_angle_entry.bind('<Return>', lambda ev: self.apply_laser_angle())
+
         self.laser_reflect_var = tk.BooleanVar(value=self.laser_reflect)
         ttk.Checkbutton(laser_fr, text='Отражения', variable=self.laser_reflect_var, command=self.toggle_laser_reflect).grid(row=2, column=0, columnspan=3)
         ttk.Button(laser_fr, text='Без лимита', command=self.toggle_laser_unlimited).grid(row=3, column=0, pady=4)
@@ -1692,6 +1699,34 @@ class LaserApp:
             self._partial_task_id = self.root.after(ms, self._partial_step)
         except Exception:
             self._partial_task_id = None
+
+    def apply_laser_angle(self):
+        try:
+            val = float(self.laser_angle_entry.get())
+            # нормализуем на 0..360
+            val = val % 360.0
+            self.laser_angle_deg = val
+            # синхронизируем с слайдером
+            try:
+                self.laser_angle_scale.set(self.laser_angle_deg)
+            except Exception:
+                pass
+            self.render()
+        except Exception:
+            messagebox.showerror('Ошибка', 'Введите корректный угол (число).')
+
+    def _on_laser_angle(self, val):
+        try:
+            self.laser_angle_deg = float(val)
+            # обновляем поле ввода (красиво округляем)
+            try:
+                self.laser_angle_entry.delete(0, 'end')
+                self.laser_angle_entry.insert(0, str(round(self.laser_angle_deg, 6)).rstrip('0').rstrip('.'))
+            except Exception:
+                pass
+            self.render()
+        except Exception:
+            pass
 
 # ---- Main ----
 if __name__ == '__main__':
