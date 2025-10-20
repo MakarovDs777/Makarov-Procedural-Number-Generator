@@ -266,6 +266,8 @@ class LaserApp:
 
         ttk.Button(laser_fr, text='Применить', command=self.apply_partial_params).grid(row=5, column=2, padx=(4,0))
 
+        ttk.Button(modes_fr, text='Процедурно: символы из файла', command=self.procedural_assign_from_file).grid(row=5, column=1, pady=4)
+
         # бинды: Enter применяет параметры
         self.partial_count_entry.bind('<Return>', lambda ev: self.apply_partial_params())
         self.partial_interval_entry.bind('<Return>', lambda ev: self.apply_partial_params())
@@ -880,6 +882,97 @@ class LaserApp:
             bounce += 1
 
         return {'segments': segs, 'hits': hits}
+    # Метод класса LaserApp:
+    def procedural_assign_from_file(self):
+        fn = filedialog.askopenfilename(filetypes=[('Text','*.txt'),('All','*.*')])
+        if not fn:
+            return
+        try:
+            with open(fn, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception:
+            messagebox.showerror('Ошибка', 'Не могу прочитать файл')
+            return
+
+        # Токены — любая последовательность непробельных символов
+        tokens = re.findall(r'\S+', content)
+        if not tokens:
+            messagebox.showinfo('Пустой файл', 'В файле не найдено символов')
+            return
+
+        # Собираем все отрезки (по stroke'ам)
+        segments = []
+        for si, s in enumerate(self.strokes):
+            if not s or 'points' not in s or len(s['points']) < 2:
+                continue
+            for i in range(1, len(s['points'])):
+                A = s['points'][i - 1]
+                B = s['points'][i]
+                segVec = v_sub(B, A)
+                segLen = v_len(segVec)
+                if segLen <= 1e-12:
+                    continue
+                segments.append({'strokeIndex': si, 'A': A, 'B': B, 'len': segLen})
+
+        if not segments:
+            messagebox.showinfo('Нет линий', 'Нет нарисованных линий для расстановки символов.')
+            return
+
+        if not messagebox.askyesno('Подтвердите',
+                                   f'Будет создано {len(tokens)} меток. Старые метки будут удалены. Продолжить?'):
+            return
+
+        # Распределяем равномерно по длине: выбираем случайную позицию по суммарной длине
+        total_len = sum(s['len'] for s in segments)
+        if total_len <= 0:
+            messagebox.showerror('Ошибка', 'Нулевые длины сегментов.')
+            return
+
+        self.tags = []
+        for tok in tokens:
+            r = random.random() * total_len
+            acc = 0.0
+            placed = False
+            for seg in segments:
+                if acc + seg['len'] >= r:
+                    frac = (r - acc) / seg['len']
+                    pt = v_add(seg['A'], v_scale(v_sub(seg['B'], seg['A']), frac))
+                    segDir = v_norm(v_sub(seg['B'], seg['A']))
+                    epsilon = min(0.0001, seg['len'] * 0.02)
+                    a = v_add(pt, v_scale(segDir, -epsilon))
+                    b = v_add(pt, v_scale(segDir, epsilon))
+                    _id = str(time.time()) + str(random.random())
+                    self.tags.append({
+                        'id': _id,
+                        'number': tok,
+                        'a': a,
+                        'b': b,
+                        'strokeIndex': seg['strokeIndex']
+                    })
+                    placed = True
+                    break
+                acc += seg['len']
+
+            # На случай числовой неточности — поместить в последний сегмент
+            if not placed:
+                seg = segments[-1]
+                frac = 0.5
+                pt = v_add(seg['A'], v_scale(v_sub(seg['B'], seg['A']), frac))
+                segDir = v_norm(v_sub(seg['B'], seg['A']))
+                epsilon = min(0.0001, seg['len'] * 0.02)
+                a = v_add(pt, v_scale(segDir, -epsilon))
+                b = v_add(pt, v_scale(segDir, epsilon))
+                _id = str(time.time()) + str(random.random())
+                self.tags.append({
+                    'id': _id,
+                    'number': tok,
+                    'a': a,
+                    'b': b,
+                    'strokeIndex': seg['strokeIndex']
+                })
+
+        self.render()
+        messagebox.showinfo('Готово', f'Создано {len(tokens)} меток.')
 
     # ---- Frame / tags / erase ----
     def rect_from_frame_screen(self, f):
