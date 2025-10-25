@@ -1,8 +1,9 @@
-# Laser-Gun-on-endless-drawning-map-online-version
+# Laser-Gun-on-endless-drawning-map-online
 
 [Laser-Gun-on-endless-drawning-map-online-version](https://codepen.io/HoytII/pen/NPGVwYJ)
 
-# Laser-Gun-on-endless-drawning-map
+# Laser-Gun-on-endless-drawning-map-online-3D
+
 
 
 [Makarov's Kolcetron (Version 0 - Lazer gun) | Babylon.js Playground](https://playground.babylonjs.com/#2UCAPU)
